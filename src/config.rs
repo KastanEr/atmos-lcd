@@ -13,11 +13,13 @@ pub struct Config {
     pub item: Option<String>,
     /// Don't stream; let the cooler play its stored media.
     pub offline: bool,
+    /// Keep the LCD showing stored media while the PC sleeps.
+    pub display_in_sleep: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { rotation: 0, brightness: 80, screen: "system".into(), item: None, offline: false }
+        Config { rotation: 0, brightness: 80, screen: "system".into(), item: None, offline: false, display_in_sleep: false }
     }
 }
 
@@ -44,6 +46,7 @@ impl Config {
                 "screen" => c.screen = value.to_string(),
                 "item" if !value.is_empty() => c.item = Some(value.into()),
                 "offline" => c.offline = value == "1",
+                "display_in_sleep" => c.display_in_sleep = value == "1",
                 _ => {}
             }
         }
@@ -56,12 +59,13 @@ impl Config {
             std::fs::create_dir_all(dir)?;
         }
         let text = format!(
-            "rotation={}\nbrightness={}\nscreen={}\nitem={}\noffline={}\n",
+            "rotation={}\nbrightness={}\nscreen={}\nitem={}\noffline={}\ndisplay_in_sleep={}\n",
             self.rotation,
             self.brightness,
             self.screen,
             self.item.as_deref().unwrap_or(""),
-            self.offline as u8
+            self.offline as u8,
+            self.display_in_sleep as u8
         );
         std::fs::write(path, text)
     }

@@ -426,9 +426,10 @@ export component AppWindow inherits Window {
     icon: @image-url("icon.png");
     default-font-family: "Pretendard";
     background: Theme.ground;
-    preferred-width: 880px;
-    preferred-height: 640px;
-    min-width: 760px;
+    // Fixed size: the layout (five 168 px storage slots, seven gallery columns) is
+    // designed for exactly this.
+    width: 1280px;
+    height: 720px;
 
     // Scaled to the exact pixel size, corners rounded (transparent), by the app.
     in property <image> preview;
@@ -445,6 +446,7 @@ export component AppWindow inherits Window {
     in-out property <int> rotation-index;
     // The cooler plays its stored media; the screen choice is fixed to the gallery.
     in property <bool> offline;
+    in property <bool> display-in-sleep;
 
     in property <[GalleryTile]> tiles;
     in property <string> selected-id;
@@ -462,6 +464,7 @@ export component AppWindow inherits Window {
 
     callback settings-changed();
     callback toggle-offline();
+    callback toggle-display-in-sleep();
     callback add-items();
     callback select-item(string);
     callback delete-item(string);
@@ -613,6 +616,70 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+
+            Card {
+                VerticalLayout {
+                    HorizontalLayout {
+                        padding: 14px;
+                        padding-top: 11px;
+                        padding-bottom: 11px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: "오프라인 모드";
+                                font-size: 13px;
+                                color: Theme.text;
+                            }
+                            Text {
+                                text: "쿨러에 저장한 화면을 재생해요";
+                                font-size: 11px;
+                                color: Theme.secondary;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Toggle {
+                                checked: root.offline;
+                                toggled => { root.toggle-offline(); }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        Separator { }
+                    }
+                    HorizontalLayout {
+                        padding: 14px;
+                        padding-top: 11px;
+                        padding-bottom: 11px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: "PC 절전 중에도 표시";
+                                font-size: 13px;
+                                color: Theme.text;
+                            }
+                            Text {
+                                text: "절전 중에는 저장된 화면을 재생해요";
+                                font-size: 11px;
+                                color: Theme.secondary;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Toggle {
+                                checked: root.display-in-sleep;
+                                toggled => { root.toggle-display-in-sleep(); }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Right: registered media, and in offline mode the cooler's storage.
@@ -639,19 +706,8 @@ export component AppWindow inherits Window {
                         color: Theme.secondary;
                         vertical-alignment: center;
                         overflow: elide;
-                    }
-                }
-                Text {
-                    text: "오프라인 모드";
-                    font-size: 13px;
-                    color: Theme.text;
-                    vertical-alignment: center;
-                }
-                VerticalLayout {
-                    alignment: center;
-                    Toggle {
-                        checked: root.offline;
-                        toggled => { root.toggle-offline(); }
+                        min-width: 0;
+                        horizontal-stretch: 1;
                     }
                 }
                 VerticalLayout {
@@ -735,16 +791,17 @@ export component AppWindow inherits Window {
                             font-size: 12px;
                             color: Theme.secondary;
                             overflow: elide;
+                            // Elide instead of widening the window's minimum size.
+                            min-width: 0;
+                            horizontal-stretch: 1;
                         }
                     }
                     HorizontalLayout {
-                        spacing: 10px;
+                        spacing: 12px;
                         for slot[i] in root.slots: Slot {
-                            // Share the width; square.
-                            horizontal-stretch: 1;
-                            min-width: 64px;
-                            max-width: 120px;
-                            height: self.width;
+                            // Five fill the fixed-width window's right column exactly.
+                            width: 168px;
+                            height: 168px;
                             slot: slot;
                             index: i;
                             drop-target: root.dragging

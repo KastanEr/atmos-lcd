@@ -336,6 +336,7 @@ impl Worker {
                     if dirty {
                         d.set_brightness(config.brightness)?;
                         d.set_rotation(config.split_rotation().0)?;
+                        d.set_display_in_sleep(config.display_in_sleep)?;
                         if config.offline {
                             d.set_realtime(false)?;
                         }

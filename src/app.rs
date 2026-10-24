@@ -340,6 +340,11 @@ impl App {
         self.apply(c);
     }
 
+    fn toggle_display_in_sleep(&mut self) {
+        let c = Config { display_in_sleep: !self.config.display_in_sleep, ..self.config.clone() };
+        self.apply(c);
+    }
+
     fn storage_event(&mut self, event: StorageEvent) {
         match event {
             StorageEvent::Slots(filled) => {
@@ -424,13 +429,14 @@ fn load_into_window(w: &AppWindow, c: &Config) {
     w.set_rotation_index((c.rotation / ROTATION_STEP) as i32);
     w.set_selected_id(c.item.as_deref().unwrap_or("").into());
     w.set_offline(c.offline);
+    w.set_display_in_sleep(c.display_in_sleep);
 }
 
 // Logical sizes and corner radii of the images in the window (see app.slint).
 const PREVIEW_SIZE: f32 = 208.0;
 const PREVIEW_RADIUS: f32 = 22.0;
 const TILE_SIZE: f32 = 110.0;
-const SLOT_SIZE: f32 = 120.0;
+const SLOT_SIZE: f32 = 168.0;
 const TILE_RADIUS: f32 = 10.0;
 /// The preview's shadow: blur radius, how far it drops, and its opacity.
 const SHADOW_BLUR: f32 = 14.0;
@@ -692,6 +698,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let app = app.clone();
         window.on_toggle_offline(move || app.borrow_mut().toggle_offline());
+    }
+    {
+        let app = app.clone();
+        window.on_toggle_display_in_sleep(move || app.borrow_mut().toggle_display_in_sleep());
     }
     // Open the window on first run so a new user sees something; later starts stay in the tray.
     if !Config::exists() {

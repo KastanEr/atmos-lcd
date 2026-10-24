@@ -86,6 +86,11 @@ impl Atmos {
         self.request("POST", "realtimeDisplay", &format!("{{\"enable\":{enable}}}"), 42)
     }
 
+    /// Whether the device keeps showing its stored media while the PC sleeps.
+    pub fn set_display_in_sleep(&self, enable: bool) -> io::Result<String> {
+        self.request("POST", "displayInSleep", &format!("{{\"enable\":{enable}}}"), 42)
+    }
+
     /// Removes a stored file, e.g. `suspend_0.jpg` of kind `suspend`.
     pub fn delete_media(&self, file_name: &str, kind: &str) -> io::Result<String> {
         self.request("POST", "delMedia", &format!("{{\"fileName\":\"{file_name}\",\"type\":\"{kind}\"}}"), 42)
