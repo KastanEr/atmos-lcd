@@ -153,7 +153,7 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         // Low-level access to the device's stored media, for experiments.
         "media-upload" => {
             let data = std::fs::read(arg(3)?)?;
-            Atmos::open()?.upload(arg(1)?, arg(2)?, &data)?;
+            Atmos::open()?.upload(arg(1)?, arg(2)?, &data, &mut |_| {})?;
             println!("uploaded {} bytes", data.len());
         }
         "media-delete" => println!("{}", Atmos::open()?.delete_media(arg(1)?, arg(2)?)?),

@@ -14,6 +14,9 @@ export struct SlotTile {
     name: string,
     filled: bool,
     busy: bool,
+    // While busy: what is happening ("변환 중", "업로드 중") and how far, 0..1.
+    phase: string,
+    progress: float,
 }
 
 // The software renderer clips children to a rectangle, not its rounded corners;
@@ -95,9 +98,28 @@ component Slot inherits Rectangle {
     if root.slot.busy: Rectangle {
         background: #000000b0;
         Text {
-            text: "저장 중…";
+            y: parent.height / 2 - 18px;
+            width: parent.width;
+            text: root.slot.phase + "\n" + Math.round(root.slot.progress * 100) + "%";
+            horizontal-alignment: center;
             color: white;
             font-size: 12px;
+        }
+        // Progress bar along the bottom edge.
+        Rectangle {
+            x: 10px;
+            y: parent.height - 16px;
+            width: parent.width - 20px;
+            height: 4px;
+            border-radius: 2px;
+            background: #ffffff40;
+            Rectangle {
+                x: 0;
+                width: parent.width * root.slot.progress;
+                height: parent.height;
+                border-radius: 2px;
+                background: Palette.accent-background;
+            }
         }
     }
     CornerMask {

@@ -204,10 +204,11 @@ pub fn export_dir() -> PathBuf {
 
 /// Writes the item as a file the cooler can store: JPEG for stills, H.264 MP4 for
 /// animations. Runs in a child process; returns the written path.
-pub fn export(id: &str, extra_rotation: u16, out_dir: &Path) -> Result<PathBuf, String> {
+/// `progress` receives 0.0..=1.0 while animations are encoded.
+pub fn export(id: &str, extra_rotation: u16, out_dir: &Path, mut progress: impl FnMut(f32)) -> Result<PathBuf, String> {
     let rotation = extra_rotation.to_string();
     let args = [OsStr::new("export"), OsStr::new(id), OsStr::new(&rotation), out_dir.as_os_str()];
-    run_child(&args, &mut |_| {}).map(PathBuf::from)
+    run_child(&args, &mut progress).map(PathBuf::from)
 }
 
 /// Child side of `export`.
@@ -226,7 +227,12 @@ pub fn export_in_process(id: &str, extra_rotation: u16, out_dir: &Path) -> Resul
     let out = out_dir.join(format!("{id}.mp4"));
     let total: Duration = (0..frames.len()).map(|i| frames.delay(i)).sum();
     let fps = ((frames.len() as f32 / total.as_secs_f32().max(0.001)).round() as u32).clamp(1, media::MAX_FPS);
-    let decoded = (0..frames.len()).map(|i| {
+    let count = frames.len();
+    let decoded = (0..count).map(|i| {
+        if i % 10 == 0 {
+            println!("progress {:.3}", i as f32 / count as f32);
+            let _ = io::stdout().flush();
+        }
         let jpeg = frames.read(i).map_err(|e| e.to_string())?;
         let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
         Ok((img.into_rgba8(), frames.delay(i)))

@@ -111,12 +111,14 @@ pub enum StorageOp {
 pub enum StorageEvent {
     /// Which slots hold a file.
     Slots(Vec<bool>),
+    /// Share of an upload into the slot that has been sent.
+    Uploading(usize, f32),
     Stored(usize),
     Failed(usize, String),
 }
 
 /// Runs one storage operation; returns the slot it touched.
-fn run_storage(d: &mut Atmos, op: &StorageOp) -> std::io::Result<Option<usize>> {
+fn run_storage(d: &mut Atmos, op: &StorageOp, report: &dyn Fn(StorageEvent)) -> std::io::Result<Option<usize>> {
     let clear = |d: &mut Atmos, slot: usize| -> std::io::Result<()> {
         // A slot holds either kind; remove both like MasterCTRL does.
         for ext in ["mp4", "jpg"] {
@@ -130,7 +132,14 @@ fn run_storage(d: &mut Atmos, op: &StorageOp) -> std::io::Result<Option<usize>> 
             let data = std::fs::read(file)?;
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("jpg").to_ascii_lowercase();
             clear(d, *slot)?;
-            d.upload(&format!("suspend_{slot}.{ext}"), "suspend", &data)?;
+            let mut last = -1.0f32;
+            d.upload(&format!("suspend_{slot}.{ext}"), "suspend", &data, &mut |p| {
+                // Whole percents are enough for the UI.
+                if p - last >= 0.01 || p >= 1.0 {
+                    last = p;
+                    report(StorageEvent::Uploading(*slot, p));
+                }
+            })?;
             Ok(Some(*slot))
         }
         StorageOp::Clear(slot) => clear(d, *slot).map(|_| Some(*slot)),
@@ -306,7 +315,7 @@ impl Worker {
                 let result = (|| -> std::io::Result<()> {
                     if !storage_ops.is_empty() {
                         while let Some(op) = storage_ops.pop_front() {
-                            match run_storage(d, &op) {
+                            match run_storage(d, &op, &*hooks.storage) {
                                 Ok(Some(slot)) if matches!(op, StorageOp::Store(..)) => {
                                     (hooks.storage)(StorageEvent::Stored(slot))
                                 }

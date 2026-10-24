@@ -129,7 +129,16 @@ struct App {
     /// Filled state of the cooler's stored-media slots, as last reported.
     device_slots: Vec<bool>,
     /// Slots being exported or uploaded, with the gallery item going in.
-    storing: Vec<Option<(String, String)>>,
+    storing: Vec<Option<Storing>>,
+}
+
+/// A gallery item on its way into a storage slot.
+struct Storing {
+    id: String,
+    name: String,
+    /// `false` while converting, `true` while uploading.
+    uploading: bool,
+    progress: f32,
 }
 
 impl App {
@@ -220,11 +229,18 @@ impl App {
             .map(|i| {
                 let name = slots::name(i).unwrap_or_default();
                 let thumb = if name.is_empty() { Image::default() } else { load_image(&slots::thumb_path(i)) };
+                let job = self.storing[i].as_ref();
                 SlotTile {
                     thumb,
                     name: name.into(),
                     filled: self.device_slots.get(i).copied().unwrap_or(false),
-                    busy: self.storing[i].is_some(),
+                    busy: job.is_some(),
+                    phase: match job {
+                        Some(j) if j.uploading => "업로드 중".into(),
+                        Some(_) => "변환 중".into(),
+                        None => "".into(),
+                    },
+                    progress: job.map_or(0.0, |j| j.progress),
                 }
             })
             .collect();
@@ -237,16 +253,26 @@ impl App {
             return;
         }
         let name = gallery::list().into_iter().find(|i| i.id == id).map(|i| i.name).unwrap_or_default();
-        self.storing[slot] = Some((id.clone(), name));
+        self.storing[slot] = Some(Storing { id: id.clone(), name, uploading: false, progress: 0.0 });
         self.refresh_slots();
         let rotation = self.config.split_rotation().1 as u16;
         std::thread::spawn(move || {
-            let exported = gallery::export(&id, rotation, &gallery::export_dir());
+            let exported = gallery::export(&id, rotation, &gallery::export_dir(), |p| {
+                with_app(move |app| app.store_progress(slot, false, p));
+            });
             with_app(move |app| match exported {
                 Ok(file) => app.worker.storage(StorageOp::Store(slot, file)),
                 Err(e) => app.storage_event(StorageEvent::Failed(slot, e)),
             });
         });
+    }
+
+    fn store_progress(&mut self, slot: usize, uploading: bool, progress: f32) {
+        if let Some(job) = self.storing[slot].as_mut() {
+            job.uploading = uploading;
+            job.progress = progress;
+            self.refresh_slots();
+        }
     }
 
     fn clear_slot(&mut self, slot: usize) {
@@ -270,8 +296,9 @@ impl App {
                 }
                 self.device_slots = filled;
             }
+            StorageEvent::Uploading(slot, p) => return self.store_progress(slot, true, p),
             StorageEvent::Stored(slot) => {
-                if let Some((id, name)) = self.storing[slot].take() {
+                if let Some(Storing { id, name, .. }) = self.storing[slot].take() {
                     let _ = std::fs::remove_dir_all(gallery::export_dir().join(&id));
                     // The slot's thumbnail shows the result; only failures need words.
                     if let Err(e) = slots::record(slot, &id, &name) {
@@ -456,7 +483,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         tray,
         importer: Importer::spawn(),
         device_slots: vec![false; slots::COUNT],
-        storing: vec![None; slots::COUNT],
+        storing: (0..slots::COUNT).map(|_| None).collect(),
     }));
     app.borrow().refresh_slots();
     app.borrow_mut().refresh_gallery();

@@ -94,12 +94,13 @@ impl Atmos {
     /// Stores a file on the device: `transport`, the data, then `transported`.
     /// Kinds seen: `suspend` (`suspend_<0-4>.jpg|.mp4`, played when no host streams)
     /// and `logo` (`logo_0.mp4`).
-    pub fn upload(&mut self, file_name: &str, kind: &str, data: &[u8]) -> io::Result<()> {
+    /// `progress` receives the share of data sent, 0.0..=1.0.
+    pub fn upload(&mut self, file_name: &str, kind: &str, data: &[u8], progress: &mut dyn FnMut(f32)) -> io::Result<()> {
         let announce = format!("{{\"fileName\":\"{file_name}\",\"fileSize\":{},\"type\":\"{kind}\"}}", data.len());
         expect_success(&self.request_within("POST", "transport", &announce, 42, STORAGE_TIMEOUT)?)?;
         // Pauses as in MasterCTRL; the device prepares storage after `transport`.
         std::thread::sleep(Duration::from_millis(300));
-        self.send_data(data, FILE_FLAG)?;
+        self.send_data(data, FILE_FLAG, progress)?;
         std::thread::sleep(Duration::from_millis(500));
         // The device acknowledges the data with "AckNumber=0"; it carries no status.
         let _ = self.responses.recv_timeout(Duration::from_secs(5));
@@ -121,25 +122,35 @@ impl Atmos {
 
     /// Streams one 480x480 baseline JPEG in realtime mode.
     pub fn send_frame(&mut self, jpeg: &[u8]) -> io::Result<()> {
-        self.send_data(jpeg, REALTIME_FLAG)
+        self.send_data(jpeg, REALTIME_FLAG, &mut |_| {})
     }
 
-    fn send_data(&mut self, data: &[u8], flag: u8) -> io::Result<()> {
+    /// Sends `data` as chunk reports in batches; each batch is queued back to back.
+    fn send_data(&mut self, data: &[u8], flag: u8, progress: &mut dyn FnMut(f32)) -> io::Result<()> {
+        /// Reports per batch (about 64 KB): fine-grained progress, small buffers.
+        const BATCH: usize = 64;
         self.session = (self.session + 1) % 60;
         let total = data.len().div_ceil(CHUNK_LEN);
-        // Build every report first so they can be queued back to back.
-        let mut reports = vec![0u8; total * REPORT_LEN];
-        for ((i, chunk), r) in data.chunks(CHUNK_LEN).enumerate().zip(reports.chunks_mut(REPORT_LEN)) {
-            r[0] = DATA_REPORT;
-            r[1] = 0x5C;
-            r[2..4].copy_from_slice(&((chunk.len() + 20) as u16).to_be_bytes());
-            r[4] = self.session;
-            r[5..7].copy_from_slice(&(total as u16).to_be_bytes());
-            r[7..9].copy_from_slice(&(i as u16).to_be_bytes());
-            r[9] = flag;
-            r[24..24 + chunk.len()].copy_from_slice(chunk);
+        let mut reports = vec![0u8; BATCH * REPORT_LEN];
+        for (b, batch) in data.chunks(CHUNK_LEN * BATCH).enumerate() {
+            let count = batch.len().div_ceil(CHUNK_LEN);
+            reports[..count * REPORT_LEN].fill(0);
+            for ((j, chunk), r) in batch.chunks(CHUNK_LEN).enumerate().zip(reports.chunks_mut(REPORT_LEN)) {
+                let i = b * BATCH + j;
+                r[0] = DATA_REPORT;
+                r[1] = 0x5C;
+                r[2..4].copy_from_slice(&((chunk.len() + 20) as u16).to_be_bytes());
+                r[4] = self.session;
+                // 16-bit fields wrap for files over ~65 MB; the device still stores them whole.
+                r[5..7].copy_from_slice(&(total as u16).to_be_bytes());
+                r[7..9].copy_from_slice(&(i as u16).to_be_bytes());
+                r[9] = flag;
+                r[24..24 + chunk.len()].copy_from_slice(chunk);
+            }
+            self.hid.write_all(&reports[..count * REPORT_LEN])?;
+            progress(((b + 1) * BATCH).min(total) as f32 / total as f32);
         }
-        self.hid.write_all(&reports)
+        Ok(())
     }
 
     fn exchange(&self, text: &str, timeout: Duration) -> io::Result<String> {
