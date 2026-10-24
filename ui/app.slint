@@ -1,0 +1,121 @@
+import { Button, ComboBox, GroupBox, HorizontalBox, Slider, VerticalBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Atmos LCD";
+    icon: @image-url("icon.png");
+    default-font-family: "Malgun Gothic";
+    preferred-width: 420px;
+    min-height: 640px;
+
+    in property <image> preview;
+    in property <string> status;
+    in property <bool> connected;
+    // 0 = system, 1 = clock, 2 = image
+    in-out property <int> screen-index;
+    in-out property <string> image-name;
+    in-out property <float> brightness;
+    // index into 0, 60, ... 300 degrees
+    in-out property <int> rotation-index;
+
+    callback settings-changed();
+    callback pick-image();
+
+    VerticalBox {
+        alignment: start;
+
+        Rectangle {
+            height: 260px;
+            Rectangle {
+                width: 240px;
+                height: 240px;
+                border-radius: 12px;
+                clip: true;
+                background: #0a0c14;
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.preview;
+                    // Show the screen as it appears on the cooler.
+                    transform-rotation: root.rotation-index * 60deg;
+                }
+            }
+        }
+
+        HorizontalBox {
+            alignment: center;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: root.connected ? #4caf50 : #e57373;
+            }
+            Text {
+                text: root.status;
+                vertical-alignment: center;
+            }
+        }
+
+        GroupBox {
+            title: "화면";
+            VerticalBox {
+                ComboBox {
+                    model: ["시스템 (CPU / GPU)", "시계", "사진"];
+                    current-index <=> root.screen-index;
+                    selected => { root.settings-changed(); }
+                }
+                if root.screen-index == 2: HorizontalBox {
+                    padding: 0;
+                    Text {
+                        text: root.image-name == "" ? "선택된 사진 없음" : root.image-name;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "사진 선택…";
+                        clicked => { root.pick-image(); }
+                    }
+                }
+            }
+        }
+
+        GroupBox {
+            title: "디스플레이";
+            VerticalBox {
+                HorizontalBox {
+                    padding: 0;
+                    Text {
+                        text: "밝기";
+                        min-width: 50px;
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        minimum: 0;
+                        maximum: 100;
+                        value <=> root.brightness;
+                        released => { root.settings-changed(); }
+                    }
+                    Text {
+                        text: Math.round(root.brightness) + "%";
+                        min-width: 40px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalBox {
+                    padding: 0;
+                    Text {
+                        text: "회전";
+                        min-width: 50px;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        model: ["0°", "60°", "120°", "180°", "240°", "300°"];
+                        current-index <=> root.rotation-index;
+                        selected => { root.settings-changed(); }
+                    }
+                }
+            }
+        }
+    }
+}
