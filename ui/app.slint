@@ -233,6 +233,34 @@ component StatusBadge inherits Rectangle {
 }
 
 // Small round "×" shown on hover.
+// Round button with a circular arrow, for turning the screen 30 degrees.
+component RotateButton inherits Rectangle {
+    in property <bool> clockwise;
+    callback clicked();
+    width: 28px;
+    height: 28px;
+    border-radius: 14px;
+    background: touch.pressed ? Theme.track : touch.has-hover ? #e0e0e6 : Theme.fill;
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        // Three-quarter circle with an arrowhead at its start.
+        commands: root.clockwise
+            ? "M21 12 A9 9 0 1 1 12 3 C14.5 3 16.9 4 18.7 5.7 L21 8 M21 3 V8 H16"
+            : "M3 12 A9 9 0 1 0 12 3 C9.5 3 7.1 4 5.3 5.7 L3 8 M3 3 V8 H8";
+        stroke: Theme.text;
+        stroke-width: 1.8px;
+        fill: transparent;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 // Round trash-can button, shown on hover. The icon is a vector path so it sits
 // exactly in the middle (a text glyph doesn't).
 component RemoveButton inherits Rectangle {
@@ -458,7 +486,7 @@ export component AppWindow inherits Window {
     // 0 = system, 1 = clock, 2 = gallery
     in-out property <int> screen-index;
     in-out property <float> brightness;
-    // index into 0, 60, ... 300 degrees
+    // index into 0, 30, ... 330 degrees
     in-out property <int> rotation-index;
     // The cooler plays its stored media; the screen choice is fixed to the gallery.
     in property <bool> offline;
@@ -525,7 +553,7 @@ export component AppWindow inherits Window {
                             height: parent.height;
                             source: root.preview;
                             // Show the screen as it appears on the cooler.
-                            transform-rotation: root.rotation-index * 60deg;
+                            transform-rotation: root.rotation-index * 30deg;
                         }
                     }
                 }
@@ -616,14 +644,29 @@ export component AppWindow inherits Window {
                             font-size: 13px;
                             color: Theme.text;
                             vertical-alignment: center;
+                            horizontal-stretch: 1;
                         }
-                        Segmented {
-                            items: ["0°", "60°", "120°", "180°", "240°", "300°"];
-                            current: root.rotation-index;
-                            item-height: 24px;
-                            font-size: 12px;
-                            activated(i) => {
-                                root.rotation-index = i;
+                        // 30-degree steps, wrapping around.
+                        RotateButton {
+                            clockwise: false;
+                            clicked => {
+                                root.rotation-index = Math.mod(root.rotation-index + 11, 12);
+                                root.settings-changed();
+                            }
+                        }
+                        Text {
+                            text: (root.rotation-index * 30) + "°";
+                            width: 44px;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        RotateButton {
+                            clockwise: true;
+                            clicked => {
+                                root.rotation-index = Math.mod(root.rotation-index + 1, 12);
                                 root.settings-changed();
                             }
                         }

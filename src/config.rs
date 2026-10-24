@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// Clockwise screen rotation in degrees, 0..360.
+    /// Clockwise screen rotation in degrees: 0..360 in 30-degree steps.
     pub rotation: u16,
     pub brightness: u8,
     /// `clock`, `system` or `gallery`.
@@ -41,7 +41,7 @@ impl Config {
             let Some((key, value)) = line.split_once('=') else { continue };
             let value = value.trim();
             match key.trim() {
-                "rotation" => c.rotation = value.parse().map_or(c.rotation, |r: u16| r % 360),
+                "rotation" => c.rotation = value.parse().map_or(c.rotation, snap_rotation),
                 "brightness" => c.brightness = value.parse().map_or(c.brightness, |b: u8| b.min(100)),
                 "screen" => c.screen = value.to_string(),
                 "item" if !value.is_empty() => c.item = Some(value.into()),
@@ -79,6 +79,11 @@ impl Config {
     }
 }
 
+/// Nearest supported rotation (a multiple of 30 degrees).
+fn snap_rotation(degrees: u16) -> u16 {
+    (degrees.saturating_add(15) / 30 * 30) % 360
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +95,14 @@ mod tests {
         assert_eq!(at(60), (0, 60.0));
         assert_eq!(at(180), (180, 0.0));
         assert_eq!(at(300), (270, 30.0));
+        assert_eq!(at(330), (270, 60.0));
+    }
+
+    #[test]
+    fn rotation_snaps_to_30_degrees() {
+        assert_eq!(snap_rotation(0), 0);
+        assert_eq!(snap_rotation(44), 30);
+        assert_eq!(snap_rotation(46), 60);
+        assert_eq!(snap_rotation(350), 0);
     }
 }

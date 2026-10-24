@@ -22,7 +22,7 @@ use crate::worker::{Hooks, Status, StorageEvent, StorageOp, Worker};
 slint::include_modules!();
 
 const SCREENS: [(&str, &str); 3] = [("system", "시스템 (CPU / GPU)"), ("clock", "시계"), ("gallery", "미디어")];
-const ROTATION_STEP: u16 = 60;
+const ROTATION_STEP: u16 = 30;
 
 /// Tray menu items whose check marks mirror the config.
 struct TrayMenu {
@@ -142,6 +142,8 @@ struct App {
 struct Storing {
     id: String,
     name: String,
+    /// Rotation baked into the exported file.
+    rotation: u16,
     /// `false` while converting, `true` while uploading.
     uploading: bool,
     progress: f32,
@@ -156,7 +158,29 @@ impl App {
         self.worker.apply(config.clone());
         self.tray.sync(&config);
         load_into_window(&self.window, &config);
+        let rotation_changed = config.split_rotation().1 != self.config.split_rotation().1;
         self.config = config;
+        if rotation_changed {
+            self.restore_rotated_slots();
+        }
+    }
+
+    /// Stored media carries the part of the rotation the firmware cannot do (30/60
+    /// degrees); redo the slots this app filled so they match the new rotation.
+    fn restore_rotated_slots(&mut self) {
+        let rotation = self.config.split_rotation().1 as u16;
+        let items = gallery::list();
+        for slot in 0..slots::COUNT {
+            let Some((id, stored)) = slots::source(slot) else { continue };
+            if stored == rotation || self.device_slots.get(slot) != Some(&true) {
+                continue;
+            }
+            if items.iter().any(|i| i.id == id) {
+                self.store_slot(slot, id);
+            } else {
+                self.notify(format!("슬롯 {}의 항목이 갤러리에 없어 새 각도로 다시 만들 수 없어요", slot + 1));
+            }
+        }
     }
 
     /// Shows the settings window and prepares images for its actual display scale.
@@ -308,9 +332,9 @@ impl App {
             return;
         }
         let name = gallery::list().into_iter().find(|i| i.id == id).map(|i| i.name).unwrap_or_default();
-        self.storing[slot] = Some(Storing { id: id.clone(), name, uploading: false, progress: 0.0 });
-        self.refresh_slots();
         let rotation = self.config.split_rotation().1 as u16;
+        self.storing[slot] = Some(Storing { id: id.clone(), name, rotation, uploading: false, progress: 0.0 });
+        self.refresh_slots();
         std::thread::spawn(move || {
             let exported = gallery::export(&id, rotation, &gallery::export_dir(), |p| {
                 with_app(move |app| app.store_progress(slot, false, p));
@@ -358,10 +382,10 @@ impl App {
             }
             StorageEvent::Uploading(slot, p) => return self.store_progress(slot, true, p),
             StorageEvent::Stored(slot) => {
-                if let Some(Storing { id, name, .. }) = self.storing[slot].take() {
+                if let Some(Storing { id, name, rotation, .. }) = self.storing[slot].take() {
                     let _ = std::fs::remove_dir_all(gallery::export_dir().join(&id));
                     // The slot's thumbnail shows the result; only failures need words.
-                    if let Err(e) = slots::record(slot, &id, &name) {
+                    if let Err(e) = slots::record(slot, &id, &name, rotation) {
                         self.notify(format!("슬롯 기록 실패: {e}"));
                     }
                 }
