@@ -14,10 +14,10 @@ component Tile inherits Rectangle {
     callback clicked();
     callback delete();
 
+    property <length> name-height: 26px;
     border-radius: 8px;
-    border-width: root.selected ? 3px : 1px;
-    border-color: root.selected ? Palette.accent-background : Palette.border;
     clip: true;
+    background: Palette.control-background;
 
     area := TouchArea {
         clicked => { root.clicked(); }
@@ -26,15 +26,15 @@ component Tile inherits Rectangle {
         x: 0;
         y: 0;
         width: parent.width;
-        height: parent.width;
+        height: parent.height - root.name-height;
         source: root.tile.thumb;
         image-fit: cover;
     }
     if root.tile.badge != "": Rectangle {
-        x: 4px;
-        y: 4px;
-        width: badge-text.preferred-width + 8px;
-        height: 18px;
+        x: 6px;
+        y: 6px;
+        width: badge-text.preferred-width + 10px;
+        height: 20px;
         border-radius: 4px;
         background: #000000a0;
         badge-text := Text {
@@ -43,36 +43,50 @@ component Tile inherits Rectangle {
             font-size: 11px;
         }
     }
+    Text {
+        x: 8px;
+        y: parent.height - root.name-height;
+        width: parent.width - 16px;
+        height: root.name-height;
+        text: root.tile.name;
+        font-size: 12px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    // The software renderer clips children to the rectangle, not its rounded
+    // corners; paint the corners with the panel color instead.
+    Rectangle {
+        x: -6px;
+        y: -6px;
+        width: parent.width + 12px;
+        height: parent.height + 12px;
+        border-radius: parent.border-radius + 6px;
+        border-width: 6px;
+        border-color: Palette.alternate-background;
+    }
+    // Drawn after the thumbnail so it sits on top.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: root.selected ? 3px : 1px;
+        border-color: root.selected ? Palette.accent-background : Palette.border;
+    }
     // Delete button, shown on hover. Always present (only transparent) so its
     // own hover state can keep it visible.
     Rectangle {
         opacity: area.has-hover || delete-area.has-hover ? 1 : 0;
-        x: parent.width - 24px;
-        y: 4px;
-        width: 20px;
-        height: 20px;
-        border-radius: 10px;
+        x: parent.width - 28px;
+        y: 6px;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
         background: delete-area.has-hover ? #e53935 : #000000a0;
         Text {
             text: "×";
             color: white;
-            font-size: 14px;
+            font-size: 15px;
         }
         delete-area := TouchArea {
             clicked => { root.delete(); }
-        }
-    }
-    Rectangle {
-        y: parent.width;
-        height: parent.height - parent.width;
-        background: Palette.alternate-background;
-        Text {
-            x: 4px;
-            width: parent.width - 8px;
-            text: root.tile.name;
-            font-size: 11px;
-            overflow: elide;
-            vertical-alignment: center;
         }
     }
 }
@@ -81,10 +95,9 @@ export component AppWindow inherits Window {
     title: "Atmos LCD";
     icon: @image-url("icon.png");
     default-font-family: "Malgun Gothic";
-    preferred-width: 860px;
-    preferred-height: 560px;
+    preferred-width: 880px;
+    preferred-height: 640px;
     min-width: 760px;
-    min-height: 520px;
 
     in property <image> preview;
     in property <string> status;
@@ -213,31 +226,39 @@ export component AppWindow inherits Window {
                         clicked => { root.add-items(); }
                     }
                 }
-                ScrollView {
-                    property <length> tile-w: 104px;
-                    property <length> tile-h: 126px;
-                    property <length> gap: 10px;
-                    // As many columns as fit the current width.
-                    property <int> columns: Math.max(1, Math.floor((self.visible-width + gap) / (tile-w + gap)));
+                // Panel behind the grid so the tiles don't float on the window.
+                Rectangle {
                     vertical-stretch: 1;
-                    content-height: Math.ceil(root.tiles.length / columns) * (tile-h + gap);
-                    for tile[i] in root.tiles: Tile {
-                        x: Math.mod(i, columns) * (tile-w + gap);
-                        y: Math.floor(i / columns) * (tile-h + gap);
-                        width: tile-w;
-                        height: tile-h;
-                        tile: tile;
-                        selected: tile.id == root.selected-id && root.screen-index == 2;
-                        clicked => { root.select-item(tile.id); }
-                        delete => { root.delete-item(tile.id); }
-                    }
-                    if root.tiles.length == 0: Text {
-                        width: parent.width;
-                        height: 120px;
-                        text: "\"추가…\"로 사진, GIF, 동영상을 등록하세요";
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        color: Palette.foreground.with-alpha(0.6);
+                    border-radius: 10px;
+                    background: Palette.alternate-background;
+                    VerticalLayout {
+                        padding: 12px;
+                        if root.tiles.length > 0: ScrollView {
+                            property <length> tile-w: 140px;
+                            property <length> tile-h: 166px;
+                            property <length> gap: 12px;
+                            // As many columns as fit the current width.
+                            property <int> columns: Math.max(1, Math.floor((self.visible-width + gap) / (tile-w + gap)));
+                            vertical-stretch: 1;
+                            content-height: Math.ceil(root.tiles.length / columns) * (tile-h + gap);
+                            for tile[i] in root.tiles: Tile {
+                                x: Math.mod(i, columns) * (tile-w + gap);
+                                y: Math.floor(i / columns) * (tile-h + gap);
+                                width: tile-w;
+                                height: tile-h;
+                                tile: tile;
+                                selected: tile.id == root.selected-id && root.screen-index == 2;
+                                clicked => { root.select-item(tile.id); }
+                                delete => { root.delete-item(tile.id); }
+                            }
+                        }
+                        if root.tiles.length == 0: Text {
+                            vertical-stretch: 1;
+                            text: "\"추가…\"로 사진, GIF, 동영상을 등록하세요";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: Palette.foreground.with-alpha(0.6);
+                        }
                     }
                 }
             }

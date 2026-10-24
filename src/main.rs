@@ -39,6 +39,8 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = if args.is_empty() {
         if !single_instance() {
+            // Starting the exe again opens the running instance's window.
+            app::show_running_instance();
             return ExitCode::SUCCESS;
         }
         app::run()

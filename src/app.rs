@@ -135,9 +135,15 @@ impl App {
         self.config = config;
     }
 
-    /// Reloads the gallery grid from disk.
-    fn refresh_gallery(&self) {
+    /// Reloads the gallery grid from disk; forgets the selected item if it is gone.
+    fn refresh_gallery(&mut self) {
         let items = gallery::list();
+        if let Some(id) = &self.config.item
+            && !items.iter().any(|i| &i.id == id)
+        {
+            let c = Config { item: None, ..self.config.clone() };
+            self.apply(c);
+        }
         let bytes: u64 = items.iter().map(|i| i.bytes).sum();
         let tiles: Vec<GalleryTile> = items
             .iter()
@@ -260,6 +266,42 @@ fn load_thumb(id: &str) -> Image {
     Image::from_rgba8(SharedPixelBuffer::clone_from_slice(img.as_raw(), img.width(), img.height()))
 }
 
+/// Named event a second launch sets to bring up the settings window.
+const SHOW_EVENT: &str = "Local\\AtmosLcdShow";
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+pub fn show_running_instance() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
+    let name = wide(SHOW_EVENT);
+    unsafe {
+        let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if !h.is_null() {
+            SetEvent(h);
+            CloseHandle(h);
+        }
+    }
+}
+
+/// Shows the window whenever another launch signals `SHOW_EVENT`.
+fn listen_for_show(window: slint::Weak<AppWindow>) {
+    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+    let name = wide(SHOW_EVENT);
+    // Auto-reset; the handle lives as long as the process.
+    let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) } as usize;
+    if event == 0 {
+        return;
+    }
+    std::thread::spawn(move || {
+        while unsafe { WaitForSingleObject(event as _, INFINITE) } == 0 {
+            let _ = window.upgrade_in_event_loop(|w| show_window(&w));
+        }
+    });
+}
+
 fn show_window(w: &AppWindow) {
     let _ = w.show();
     w.window().set_minimized(false);
@@ -319,7 +361,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let app = Rc::new(RefCell::new(App { config, worker, window: window.clone_strong(), tray, importer: Importer::spawn() }));
-    app.borrow().refresh_gallery();
+    app.borrow_mut().refresh_gallery();
 
     // Tray events may arrive outside Slint's event loop; hop onto it.
     MenuEvent::set_event_handler(Some(|event: MenuEvent| {
@@ -338,6 +380,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }));
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
+    listen_for_show(window.as_weak());
 
     {
         let app = app.clone();
