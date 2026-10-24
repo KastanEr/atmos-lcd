@@ -423,7 +423,7 @@ impl App {
             if c.screen == "gallery" && c.item.is_none() {
                 self.tray.sync(&self.config);
                 self.window.set_screen_index(i as i32);
-                self.notify("갤러리에서 항목을 선택하세요");
+                self.notify("갤러리에서 미디어를 선택하세요");
                 self.show();
                 return;
             }
@@ -606,6 +606,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Status::Connected => (0, "연결됨", String::new()),
                     Status::Loading => (2, "불러오는 중", String::new()),
                     Status::NotFound => (1, "쿨러를 찾는 중", String::new()),
+                    Status::Idle(hint) => (0, "연결됨", hint),
                     Status::Error(e) => (3, "오류", e),
                 };
                 let _ = status_window.upgrade_in_event_loop(move |w| {
