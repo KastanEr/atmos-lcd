@@ -140,6 +140,8 @@ struct App {
     preview_live: Arc<AtomicBool>,
     /// Watches for the minimized window to be restored.
     restore_timer: slint::Timer,
+    /// Whether the window was shown before; the first time it is centered on screen.
+    placed: bool,
 }
 
 /// A gallery item on its way into a storage slot.
@@ -190,6 +192,9 @@ impl App {
     /// Shows the settings window and prepares images for its actual display scale.
     fn show(&mut self) {
         let _ = self.window.show();
+        if !std::mem::replace(&mut self.placed, true) {
+            center(self.window.window());
+        }
         self.window.window().set_minimized(false);
         self.preview_live.store(true, Ordering::Relaxed);
         self.rescale();
@@ -561,6 +566,20 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Centers the window in the primary monitor's work area (the screen minus the taskbar).
+fn center(window: &slint::Window) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
+    let mut area = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    if unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut _ as *mut _, 0) } == 0 {
+        return;
+    }
+    let size = window.size();
+    let x = area.left + (area.right - area.left - size.width as i32) / 2;
+    let y = area.top + (area.bottom - area.top - size.height as i32) / 2;
+    window.set_position(slint::PhysicalPosition::new(x.max(area.left), y.max(area.top)));
+}
+
 pub fn show_running_instance() {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
@@ -662,6 +681,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         last_frame: None,
         preview_live: preview_live.clone(),
         restore_timer: slint::Timer::default(),
+        placed: false,
     }));
     app.borrow_mut().rescale();
     app.borrow().refresh_slots();
