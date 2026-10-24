@@ -253,7 +253,7 @@ component RotateButton inherits Rectangle {
             ? "M21 12 A9 9 0 1 1 12 3 C14.5 3 16.9 4 18.7 5.7 L21 8 M21 3 V8 H16"
             : "M3 12 A9 9 0 1 0 12 3 C9.5 3 7.1 4 5.3 5.7 L3 8 M3 3 V8 H8";
         stroke: Theme.text;
-        stroke-width: 1.8px;
+        stroke-width: 1.2px;
         fill: transparent;
     }
     touch := TouchArea {
@@ -639,14 +639,8 @@ export component AppWindow inherits Window {
                         padding-top: Theme.row-pad;
                         padding-bottom: Theme.row-pad;
                         spacing: 12px;
-                        Text {
-                            text: "회전";
-                            font-size: 13px;
-                            color: Theme.text;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        // 30-degree steps, wrapping around.
+                        alignment: center;
+                        // Rotation in 30-degree steps, wrapping around.
                         RotateButton {
                             clockwise: false;
                             clicked => {
@@ -658,7 +652,6 @@ export component AppWindow inherits Window {
                             text: (root.rotation-index * 30) + "°";
                             width: 44px;
                             font-size: 13px;
-                            font-weight: 600;
                             color: Theme.text;
                             horizontal-alignment: center;
                             vertical-alignment: center;
