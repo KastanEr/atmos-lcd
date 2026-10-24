@@ -233,18 +233,28 @@ component StatusBadge inherits Rectangle {
 }
 
 // Small round "×" shown on hover.
+// Round trash-can button, shown on hover. The icon is a vector path so it sits
+// exactly in the middle (a text glyph doesn't).
 component RemoveButton inherits Rectangle {
     in property <bool> shown;
     callback clicked();
-    width: 22px;
-    height: 22px;
-    border-radius: 11px;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
     opacity: self.shown || touch.has-hover ? 1 : 0;
     background: touch.has-hover ? Theme.danger : #00000080;
-    Text {
-        text: "×";
-        color: white;
-        font-size: 15px;
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        // Lid, can, handle and two slots.
+        commands: "M3 6 H21 M8 6 V4 Q8 3 9 3 H15 Q16 3 16 4 V6 M5.5 6 L6.5 20 Q6.6 21 7.6 21 H16.4 Q17.4 21 17.5 20 L18.5 6 M10 10.5 V16.5 M14 10.5 V16.5";
+        stroke: white;
+        stroke-width: 1.6px;
+        fill: transparent;
     }
     touch := TouchArea {
         clicked => { root.clicked(); }
