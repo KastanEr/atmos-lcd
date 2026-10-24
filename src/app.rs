@@ -420,13 +420,6 @@ impl App {
         } else if let Some(i) = self.tray.screens.iter().position(|m| m.id() == id) {
             let mut c = self.config.clone();
             c.screen = SCREENS[i].0.into();
-            if c.screen == "gallery" && c.item.is_none() {
-                self.tray.sync(&self.config);
-                self.window.set_screen_index(i as i32);
-                self.notify("갤러리에서 미디어를 선택하세요");
-                self.show();
-                return;
-            }
             self.apply(c);
         } else if let Some(i) = self.tray.rotations.iter().position(|m| m.id() == id) {
             let c = Config { rotation: i as u16 * ROTATION_STEP, ..self.config.clone() };
