@@ -1734,6 +1734,7 @@ impl WinitWindowAdapter {
                 // that's not visible.
             } else {
                 self.winit_window_or_none.borrow().set_visible(false);
+                self.renderer().hidden();
             }
 
             /* FIXME:

@@ -192,6 +192,20 @@ impl super::WinitCompatibleRenderer for WinitSoftwareRenderer {
         self.contents_lost.set(true);
     }
 
+    fn hidden(&self) {
+        // A fresh surface holds no pixels until the next `render` resizes it, which frees
+        // the window-sized buffer (megabytes) while the window stays hidden.
+        let context = self._context.borrow();
+        let mut surface = self.surface.borrow_mut();
+        if let (Some(context), Some(old)) = (context.as_ref(), surface.as_ref())
+            && let Ok(fresh) = softbuffer::Surface::new(context, old.window().clone())
+        {
+            *surface = Some(fresh);
+            self.renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+            self.contents_lost.set(true);
+        }
+    }
+
     fn resume(
         &self,
         active_event_loop: &ActiveEventLoop,

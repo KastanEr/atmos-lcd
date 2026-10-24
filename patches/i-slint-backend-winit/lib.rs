@@ -82,6 +82,8 @@ mod renderer {
         fn as_core_renderer(&self) -> &dyn i_slint_core::renderer::Renderer;
         // Got WindowEvent::Occluded
         fn occluded(&self, _: bool) {}
+        // The window was hidden; renderers may drop buffers that a later frame can recreate.
+        fn hidden(&self) {}
 
         fn suspend(&self) -> Result<(), PlatformError>;
 
