@@ -1,4 +1,4 @@
-import { Button, ComboBox, GroupBox, HorizontalBox, Palette, ScrollView, Slider, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, GroupBox, HorizontalBox, Palette, ScrollView, Slider, Switch, VerticalBox } from "std-widgets.slint";
 
 export struct GalleryTile {
     id: string,
@@ -8,19 +8,163 @@ export struct GalleryTile {
     badge: string,
 }
 
+export struct SlotTile {
+    thumb: image,
+    // Empty unless this app stored the slot's content.
+    name: string,
+    filled: bool,
+    busy: bool,
+}
+
+// The software renderer clips children to a rectangle, not its rounded corners;
+// this paints the corners with the surrounding color instead. Place it with
+// x/y -6px and the parent's size plus 12px.
+component CornerMask inherits Rectangle {
+    in property <length> radius;
+    in property <brush> outside;
+    border-radius: self.radius + 6px;
+    border-width: 6px;
+    border-color: self.outside;
+}
+
+// Round button with a glyph, revealed on hover.
+component RoundButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> shown;
+    callback clicked();
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    opacity: self.shown || touch.has-hover ? 1 : 0;
+    background: touch.has-hover ? #e53935 : #000000a0;
+    Text {
+        text: root.glyph;
+        color: white;
+        font-size: 15px;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component Slot inherits Rectangle {
+    in property <SlotTile> slot;
+    in property <int> index;
+    // A gallery tile is being dragged over this slot.
+    in property <bool> drop-target;
+    callback clear();
+    // Reports `drop-target` changes so the window knows where a drag ends.
+    callback hover(bool);
+
+    changed drop-target => { root.hover(self.drop-target); }
+
+    border-radius: 8px;
+    clip: true;
+    background: Palette.control-background;
+
+    area := TouchArea { }
+    if root.slot.filled && root.slot.name != "": Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.slot.thumb;
+        image-fit: cover;
+    }
+    if !root.slot.filled || root.slot.name == "": Text {
+        y: 30px;
+        width: parent.width;
+        height: parent.height - 36px;
+        text: root.slot.filled ? "이전에\n저장됨" : "여기로\n끌어다 놓기";
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: 12px;
+        color: Palette.foreground.with-alpha(0.55);
+    }
+    Rectangle {
+        x: 6px;
+        y: 6px;
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: #000000a0;
+        Text {
+            text: root.index + 1;
+            color: white;
+            font-size: 11px;
+        }
+    }
+    if root.slot.busy: Rectangle {
+        background: #000000b0;
+        Text {
+            text: "저장 중…";
+            color: white;
+            font-size: 12px;
+        }
+    }
+    CornerMask {
+        x: -6px;
+        y: -6px;
+        width: parent.width + 12px;
+        height: parent.height + 12px;
+        radius: parent.border-radius;
+        outside: Palette.background;
+    }
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: root.drop-target ? 3px : 1px;
+        border-color: root.drop-target ? Palette.accent-background : Palette.border;
+    }
+    if root.slot.filled && !root.slot.busy: RoundButton {
+        x: parent.width - 28px;
+        y: 6px;
+        glyph: "×";
+        shown: area.has-hover;
+        clicked => { root.clear(); }
+    }
+}
+
 component Tile inherits Rectangle {
     in property <GalleryTile> tile;
     in property <bool> selected;
+    // Tiles can be dragged onto the cooler's storage slots (offline mode).
+    in property <bool> draggable;
     callback clicked();
     callback delete();
+    callback drag-start();
+    // Pointer position in window coordinates.
+    callback drag-move(length, length);
+    callback drag-end();
 
     property <length> name-height: 26px;
+    property <bool> dragging;
     border-radius: 8px;
     clip: true;
     background: Palette.control-background;
 
     area := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => {
+            if !root.dragging {
+                root.clicked();
+            }
+        }
+        moved => {
+            if self.pressed && root.draggable {
+                // A small threshold keeps ordinary clicks from turning into drags.
+                if !root.dragging && (abs(self.mouse-x - self.pressed-x) > 6px || abs(self.mouse-y - self.pressed-y) > 6px) {
+                    root.dragging = true;
+                    root.drag-start();
+                }
+                if root.dragging {
+                    root.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.dragging = false;
+            } else if event.kind == PointerEventKind.up && root.dragging {
+                root.drag-end();
+            }
+        }
     }
     Image {
         x: 0;
@@ -53,41 +197,25 @@ component Tile inherits Rectangle {
         overflow: elide;
         vertical-alignment: center;
     }
-    // The software renderer clips children to the rectangle, not its rounded
-    // corners; paint the corners with the panel color instead.
-    Rectangle {
+    CornerMask {
         x: -6px;
         y: -6px;
         width: parent.width + 12px;
         height: parent.height + 12px;
-        border-radius: parent.border-radius + 6px;
-        border-width: 6px;
-        border-color: Palette.alternate-background;
+        radius: parent.border-radius;
+        outside: Palette.alternate-background;
     }
-    // Drawn after the thumbnail so it sits on top.
     Rectangle {
         border-radius: parent.border-radius;
         border-width: root.selected ? 3px : 1px;
         border-color: root.selected ? Palette.accent-background : Palette.border;
     }
-    // Delete button, shown on hover. Always present (only transparent) so its
-    // own hover state can keep it visible.
-    Rectangle {
-        opacity: area.has-hover || delete-area.has-hover ? 1 : 0;
+    RoundButton {
         x: parent.width - 28px;
         y: 6px;
-        width: 22px;
-        height: 22px;
-        border-radius: 11px;
-        background: delete-area.has-hover ? #e53935 : #000000a0;
-        Text {
-            text: "×";
-            color: white;
-            font-size: 15px;
-        }
-        delete-area := TouchArea {
-            clicked => { root.delete(); }
-        }
+        glyph: "×";
+        shown: area.has-hover;
+        clicked => { root.delete(); }
     }
 }
 
@@ -107,17 +235,30 @@ export component AppWindow inherits Window {
     in-out property <float> brightness;
     // index into 0, 60, ... 300 degrees
     in-out property <int> rotation-index;
+    // The cooler plays its stored media; the screen choice is fixed to the gallery.
+    in property <bool> offline;
 
     in property <[GalleryTile]> tiles;
     in property <string> selected-id;
     in property <string> gallery-summary;
     // Shown while files are being converted; empty otherwise.
     in property <string> import-status;
+    in property <[SlotTile]> slots;
+
+    // Drag and drop from the gallery onto a storage slot.
+    property <bool> dragging;
+    property <GalleryTile> drag-tile;
+    property <length> drag-x;
+    property <length> drag-y;
+    property <int> hovered-slot: -1;
 
     callback settings-changed();
+    callback toggle-offline();
     callback add-items();
     callback select-item(string);
     callback delete-item(string);
+    callback drop-item(string, int);
+    callback clear-slot(int);
 
     HorizontalBox {
         // Left: what the cooler shows and how.
@@ -160,10 +301,15 @@ export component AppWindow inherits Window {
 
             GroupBox {
                 title: "화면";
-                ComboBox {
+                if !root.offline: ComboBox {
                     model: ["시스템 (CPU / GPU)", "시계", "갤러리"];
                     current-index <=> root.screen-index;
                     selected => { root.settings-changed(); }
+                }
+                if root.offline: ComboBox {
+                    model: ["갤러리"];
+                    current-index: 0;
+                    enabled: false;
                 }
             }
 
@@ -207,62 +353,157 @@ export component AppWindow inherits Window {
             }
         }
 
-        // Right: registered media.
-        GroupBox {
-            title: "갤러리";
-            vertical-stretch: 1;
-            VerticalBox {
+        // Right: registered media, and in offline mode the cooler's storage.
+        VerticalBox {
+            padding: 0;
+            HorizontalBox {
                 padding: 0;
-                HorizontalBox {
-                    padding: 0;
-                    Text {
-                        text: root.import-status != "" ? root.import-status : root.gallery-summary;
-                        overflow: elide;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                    Button {
-                        text: "추가…";
-                        clicked => { root.add-items(); }
-                    }
+                alignment: end;
+                Switch {
+                    text: "오프라인 모드";
+                    checked: root.offline;
+                    toggled => { root.toggle-offline(); }
                 }
-                // Panel behind the grid so the tiles don't float on the window.
-                Rectangle {
-                    vertical-stretch: 1;
-                    border-radius: 10px;
-                    background: Palette.alternate-background;
-                    VerticalLayout {
-                        padding: 12px;
-                        if root.tiles.length > 0: ScrollView {
-                            property <length> tile-w: 140px;
-                            property <length> tile-h: 166px;
-                            property <length> gap: 12px;
-                            // As many columns as fit the current width.
-                            property <int> columns: Math.max(1, Math.floor((self.visible-width + gap) / (tile-w + gap)));
-                            vertical-stretch: 1;
-                            content-height: Math.ceil(root.tiles.length / columns) * (tile-h + gap);
-                            for tile[i] in root.tiles: Tile {
-                                x: Math.mod(i, columns) * (tile-w + gap);
-                                y: Math.floor(i / columns) * (tile-h + gap);
-                                width: tile-w;
-                                height: tile-h;
-                                tile: tile;
-                                selected: tile.id == root.selected-id && root.screen-index == 2;
-                                clicked => { root.select-item(tile.id); }
-                                delete => { root.delete-item(tile.id); }
+            }
+
+            GroupBox {
+                title: "갤러리";
+                vertical-stretch: 1;
+                VerticalBox {
+                    padding: 0;
+                    HorizontalBox {
+                        padding: 0;
+                        Text {
+                            text: root.import-status != "" ? root.import-status
+                                : root.offline && root.tiles.length > 0 ? root.gallery-summary + " · 슬롯으로 끌어다 놓으면 쿨러에 저장"
+                                : root.gallery-summary;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "추가…";
+                            clicked => { root.add-items(); }
+                        }
+                    }
+                    // Panel behind the grid so the tiles don't float on the window.
+                    Rectangle {
+                        vertical-stretch: 1;
+                        border-radius: 10px;
+                        background: Palette.alternate-background;
+                        VerticalLayout {
+                            padding: 12px;
+                            if root.tiles.length > 0: ScrollView {
+                                property <length> tile-w: 140px;
+                                property <length> tile-h: 166px;
+                                property <length> gap: 12px;
+                                // As many columns as fit the current width.
+                                property <int> columns: Math.max(1, Math.floor((self.visible-width + gap) / (tile-w + gap)));
+                                vertical-stretch: 1;
+                                content-height: Math.ceil(root.tiles.length / columns) * (tile-h + gap);
+                                for tile[i] in root.tiles: Tile {
+                                    x: Math.mod(i, columns) * (tile-w + gap);
+                                    y: Math.floor(i / columns) * (tile-h + gap);
+                                    width: tile-w;
+                                    height: tile-h;
+                                    tile: tile;
+                                    draggable: root.offline;
+                                    selected: tile.id == root.selected-id && (root.screen-index == 2 || root.offline);
+                                    clicked => { root.select-item(tile.id); }
+                                    delete => { root.delete-item(tile.id); }
+                                    drag-start => {
+                                        root.drag-tile = tile;
+                                        root.dragging = true;
+                                    }
+                                    drag-move(x, y) => {
+                                        root.drag-x = x;
+                                        root.drag-y = y;
+                                    }
+                                    drag-end => {
+                                        // Read the target before `dragging` clears the slots' hover state.
+                                        if root.hovered-slot >= 0 {
+                                            root.drop-item(tile.id, root.hovered-slot);
+                                        }
+                                        root.dragging = false;
+                                        root.hovered-slot = -1;
+                                    }
+                                }
+                            }
+                            if root.tiles.length == 0: Text {
+                                vertical-stretch: 1;
+                                text: "\"추가…\"로 사진, GIF, 동영상을 등록하세요";
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                color: Palette.foreground.with-alpha(0.6);
                             }
                         }
-                        if root.tiles.length == 0: Text {
-                            vertical-stretch: 1;
-                            text: "\"추가…\"로 사진, GIF, 동영상을 등록하세요";
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            color: Palette.foreground.with-alpha(0.6);
+                    }
+
+                    // Takes only the height it needs; the gallery panel gets the rest.
+                    if root.offline: VerticalLayout {
+                        vertical-stretch: 0;
+                        spacing: 8px;
+                        padding-top: 8px;
+                        HorizontalLayout {
+                            vertical-stretch: 0;
+                            alignment: start;
+                            spacing: 10px;
+                            Text {
+                                text: "쿨러 저장공간";
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "저장된 항목을 번갈아 재생해요";
+                                color: Palette.foreground.with-alpha(0.6);
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        HorizontalLayout {
+                            vertical-stretch: 0;
+                            spacing: 10px;
+                            for slot[i] in root.slots: Slot {
+                                // Share the width; square, but never larger than a gallery tile.
+                                horizontal-stretch: 1;
+                                min-width: 64px;
+                                max-width: 140px;
+                                height: self.width;
+                                slot: slot;
+                                index: i;
+                                drop-target: root.dragging
+                                    && root.drag-x >= self.absolute-position.x && root.drag-x < self.absolute-position.x + self.width
+                                    && root.drag-y >= self.absolute-position.y && root.drag-y < self.absolute-position.y + self.height;
+                                hover(on) => {
+                                    if on {
+                                        root.hovered-slot = i;
+                                    } else if root.hovered-slot == i {
+                                        root.hovered-slot = -1;
+                                    }
+                                }
+                                clear => { root.clear-slot(i); }
+                            }
                         }
                     }
                 }
             }
         }
+    }
 
+    // Thumbnail following the pointer while dragging.
+    if root.dragging: Rectangle {
+        x: root.drag-x - 40px;
+        y: root.drag-y - 40px;
+        width: 80px;
+        height: 80px;
+        border-radius: 8px;
+        clip: true;
+        opacity: 0.8;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.drag-tile.thumb;
+            image-fit: cover;
+        }
     }
 }

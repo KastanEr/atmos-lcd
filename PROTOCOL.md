@@ -55,8 +55,8 @@ one stray control byte every 128 body bytes, and neither length field counts it.
 | `STATE timestamp` | 42 | `{"timestamp":<unix ms>}` | sent before each realtimeDisplay keepalive |
 | `POST transport` | 42 | `{"fileName":"logo_0.mp4","fileSize":N,"type":"logo"}` | reply `{"state":"success","blockMaxSize":1024}`, then data chunks with flag 0 |
 | `POST transported` | 42 | `{"fileName":"...","md5":1111111}` | finishes an upload |
-| `POST delMedia` | 42 | `{"fileName":"suspend_N.mp4","type":"suspend"}` | from binary |
-| `POST displayInSleep` | 42 | `{"enable":bool}` | from binary |
+| `POST delMedia` | 42 | `{"fileName":"suspend_N.mp4","type":"suspend"}` | verified; `"fileName":"all"` clears every slot (from binary) |
+| `POST displayInSleep` | 42 | `{"enable":bool}` | from binary: show stored media while the PC sleeps |
 
 Upload types seen in the binary: `logo` (`logo_0.mp4`) and `suspend` (`suspend_<n>.mp4` / `.jpg`,
 up to 5). These play offline when no host is streaming. MP4 is H.264 yuv420p.
@@ -81,3 +81,34 @@ up to 5). These play offline when no host is streaming. MP4 is H.264 yuv420p.
 2. Stream baseline JPEGs (480x480, about 15–80 KB) as `0x1F` chunks with flag 1.
    MasterCTRL runs at about 13 fps.
 3. Repeat step 1 every 4 s. After about 5 s with no keepalive, the device falls back to its stored media.
+
+## Stored media (offline playback)
+
+The device keeps up to `maxSuspendMediaCount` (5) files named `suspend_<0-4>.jpg` or
+`suspend_<0-4>.mp4`, plus a boot logo `logo_0.mp4`. `param` reports which slots are
+filled in `suspendMediaActive`, e.g. `[1,1,0,0,0]`. When no host streams (or after
+`realtimeDisplay {"enable":false}`), the device plays all filled slots in turn.
+No command selects a single slot; keeping one means deleting the others.
+
+Storing a file into slot N (MasterCTRL's order, verified on hardware):
+
+1. `delMedia` for `suspend_N.mp4` and `suspend_N.jpg` (60 ms apart).
+2. `transport {"fileName":"suspend_N.mp4","fileSize":<bytes>,"type":"suspend"}` →
+   `{"state":"success","blockMaxSize":1024}`; wait 300 ms.
+3. The file as `0x1F` data chunks with flag 0; wait 500 ms. The device answers
+   `AckNumber=0` with no body.
+4. `transported {"fileName":"suspend_N.mp4","md5":1111111}` → `{"state":"success"}`.
+   MasterCTRL always sends that placeholder checksum.
+
+Accepted formats: 480x480 baseline JPEG; H.264 MP4 at 480x480 (Windows' Media
+Foundation encoder, baseline profile, ~2 Mbps; `moov` after `mdat` plays fine).
+Storage appears to be about 20 MB (`0x01400000` in feature report 0x14), not yet verified.
+
+Rotation for stored media follows the firmware `rotate` setting (90° steps); other
+angles must be applied to the file before uploading.
+
+## Throughput
+
+Writing data reports one at a time (waiting for each) gives ~16 ms per 54 KB frame.
+Keeping two or more writes in flight gives ~8.8 ms (≈ 6 MB/s, ~110 fps); that is the
+device's limit. The panel plays 60 fps smoothly.

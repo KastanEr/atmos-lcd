@@ -12,8 +12,10 @@ const DATA_REPORT: u8 = 0x1F;
 const RESP_REPORT: u8 = 0x20;
 const FRAME_MARK: u8 = 0x5A;
 const CHUNK_LEN: usize = 1000;
-/// Data chunk flag for realtime frames (file uploads use 0).
+/// Data chunk flag for realtime frames.
 const REALTIME_FLAG: u8 = 1;
+/// Data chunk flag for files announced by a `transport` command.
+const FILE_FLAG: u8 = 0;
 
 /// How often realtime mode must be refreshed; the device's keepAliveTimeout is 5 s.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4);
@@ -69,6 +71,44 @@ impl Atmos {
         self.request("STATE", "timestamp", &format!("{{\"timestamp\":{ms}}}"), 42)?;
         self.request("POST", "realtimeDisplay", "{\"enable\":true}", 42)?;
         Ok(())
+    }
+
+    /// `false` leaves realtime mode so the device plays its stored media right away.
+    pub fn set_realtime(&self, enable: bool) -> io::Result<String> {
+        self.request("POST", "realtimeDisplay", &format!("{{\"enable\":{enable}}}"), 42)
+    }
+
+    /// Removes a stored file, e.g. `suspend_0.jpg` of kind `suspend`.
+    pub fn delete_media(&self, file_name: &str, kind: &str) -> io::Result<String> {
+        self.request("POST", "delMedia", &format!("{{\"fileName\":\"{file_name}\",\"type\":\"{kind}\"}}"), 42)
+    }
+
+    /// Stores a file on the device: `transport`, the data, then `transported`.
+    /// Kinds seen: `suspend` (`suspend_<0-4>.jpg|.mp4`, played when no host streams)
+    /// and `logo` (`logo_0.mp4`).
+    pub fn upload(&mut self, file_name: &str, kind: &str, data: &[u8]) -> io::Result<()> {
+        let announce = format!("{{\"fileName\":\"{file_name}\",\"fileSize\":{},\"type\":\"{kind}\"}}", data.len());
+        expect_success(&self.request("POST", "transport", &announce, 42)?)?;
+        // Pauses as in MasterCTRL; the device prepares storage after `transport`.
+        std::thread::sleep(Duration::from_millis(300));
+        self.send_data(data, FILE_FLAG)?;
+        std::thread::sleep(Duration::from_millis(500));
+        // The device acknowledges the data with "AckNumber=0"; it carries no status.
+        let _ = self.responses.recv_timeout(Duration::from_secs(5));
+        // MasterCTRL always sends this placeholder checksum.
+        let done = format!("{{\"fileName\":\"{file_name}\",\"md5\":1111111}}");
+        expect_success(&self.request("POST", "transported", &done, 42)?)
+    }
+
+    /// Which of the stored-media slots hold a file (`suspend_<i>`).
+    pub fn suspend_slots(&self) -> io::Result<Vec<bool>> {
+        let params = self.params()?;
+        let list = params
+            .split_once("\"suspendMediaActive\":[")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| list)
+            .ok_or_else(|| io::Error::other("no suspendMediaActive in params"))?;
+        Ok(list.split(',').map(|v| v.trim() == "1").collect())
     }
 
     /// Streams one 480x480 baseline JPEG in realtime mode.
@@ -134,6 +174,14 @@ fn decode_response(r: &[u8]) -> Option<String> {
         .take(want)
         .collect();
     Some(String::from_utf8_lossy(&text).into_owned())
+}
+
+fn expect_success(reply: &str) -> io::Result<()> {
+    if body(reply).contains("\"success\"") {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("device refused: {}", reply.replace("\r\n", " "))))
+    }
 }
 
 /// The part of a response after the header block.

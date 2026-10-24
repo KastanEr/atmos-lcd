@@ -10,6 +10,7 @@ mod hid;
 mod media;
 mod render;
 mod scenes;
+mod slots;
 mod stats;
 mod video;
 mod worker;
@@ -32,6 +33,9 @@ usage: atmos-lcd [command]
   gallery                       list gallery items
   import <file>                 add a picture, GIF/WebP or video to the gallery
   bench <id> [fps...]           measure frame transfer speed with a gallery item
+  media-upload <name> <type> <file>   store a file on the device (e.g. suspend_1.jpg suspend)
+  media-delete <name> <type>
+  realtime on|off               off: play the device's stored media
 screens:
   clock | system | gallery <id> | file <path>   (file: preview only)";
 
@@ -96,7 +100,11 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         "run" => {
             let (config, _) = with_screen(&args[1..], Config::load())?;
-            let hooks = Hooks { frame: Box::new(|_| {}), status: Box::new(|s| eprintln!("{s:?}")) };
+            let hooks = Hooks {
+                frame: Box::new(|_| {}),
+                status: Box::new(|s| eprintln!("{s:?}")),
+                storage: Box::new(|_| {}),
+            };
             let _worker = Worker::spawn(config, hooks);
             loop {
                 std::thread::park();
@@ -142,7 +150,16 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let fps: Vec<u32> = args[2..].iter().map(|a| a.parse()).collect::<Result<_, _>>()?;
             bench(arg(1)?, if fps.is_empty() { &[15, 20, 25, 30] } else { &fps })?;
         }
+        // Low-level access to the device's stored media, for experiments.
+        "media-upload" => {
+            let data = std::fs::read(arg(3)?)?;
+            Atmos::open()?.upload(arg(1)?, arg(2)?, &data)?;
+            println!("uploaded {} bytes", data.len());
+        }
+        "media-delete" => println!("{}", Atmos::open()?.delete_media(arg(1)?, arg(2)?)?),
+        "realtime" => println!("{}", Atmos::open()?.set_realtime(arg(1)? == "on")?),
         "import" => child_result(gallery::import_in_process(std::path::Path::new(arg(1)?)))?,
+        "export" => child_result(gallery::export_in_process(arg(1)?, arg(2)?.parse()?, std::path::Path::new(arg(3)?)))?,
         "rotate-item" => child_result(gallery::rotate_in_process(arg(1)?, arg(2)?.parse()?))?,
         _ => return Err(USAGE.into()),
     }

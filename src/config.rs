@@ -11,11 +11,13 @@ pub struct Config {
     pub screen: String,
     /// Gallery item id shown by the `gallery` screen.
     pub item: Option<String>,
+    /// Don't stream; let the cooler play its stored media.
+    pub offline: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { rotation: 0, brightness: 80, screen: "system".into(), item: None }
+        Config { rotation: 0, brightness: 80, screen: "system".into(), item: None, offline: false }
     }
 }
 
@@ -41,6 +43,7 @@ impl Config {
                 "brightness" => c.brightness = value.parse().map_or(c.brightness, |b: u8| b.min(100)),
                 "screen" => c.screen = value.to_string(),
                 "item" if !value.is_empty() => c.item = Some(value.into()),
+                "offline" => c.offline = value == "1",
                 _ => {}
             }
         }
@@ -53,11 +56,12 @@ impl Config {
             std::fs::create_dir_all(dir)?;
         }
         let text = format!(
-            "rotation={}\nbrightness={}\nscreen={}\nitem={}\n",
+            "rotation={}\nbrightness={}\nscreen={}\nitem={}\noffline={}\n",
             self.rotation,
             self.brightness,
             self.screen,
-            self.item.as_deref().unwrap_or("")
+            self.item.as_deref().unwrap_or(""),
+            self.offline as u8
         );
         std::fs::write(path, text)
     }

@@ -7,6 +7,7 @@
 //! Converting runs in a child process (`atmos-lcd import ...`) so the decoder,
 //! GPU driver and scratch buffers never stay in the long-running app.
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::windows::fs::FileExt;
@@ -19,7 +20,7 @@ use image::imageops::FilterType;
 use tiny_skia::Pixmap;
 
 use crate::media::{self, Media};
-use crate::render;
+use crate::{render, video};
 
 const MAGIC: &[u8; 4] = b"ATF1";
 const THUMB_SIZE: u32 = 160;
@@ -194,6 +195,44 @@ pub fn rotate_in_process(id: &str, extra_rotation: u16) -> Result<String, String
     let tmp = out.with_extension("tmp");
     FrameFile::write(&tmp, &frames).and_then(|_| fs::rename(&tmp, &out)).map_err(|e| e.to_string())?;
     Ok(id.to_string())
+}
+
+/// Folder for files `export` writes before they are uploaded.
+pub fn export_dir() -> PathBuf {
+    root().with_file_name("export")
+}
+
+/// Writes the item as a file the cooler can store: JPEG for stills, H.264 MP4 for
+/// animations. Runs in a child process; returns the written path.
+pub fn export(id: &str, extra_rotation: u16, out_dir: &Path) -> Result<PathBuf, String> {
+    let rotation = extra_rotation.to_string();
+    let args = [OsStr::new("export"), OsStr::new(id), OsStr::new(&rotation), out_dir.as_os_str()];
+    run_child(&args, &mut |_| {}).map(PathBuf::from)
+}
+
+/// Child side of `export`.
+pub fn export_in_process(id: &str, extra_rotation: u16, out_dir: &Path) -> Result<String, String> {
+    let path = frames_path(id, extra_rotation);
+    if !path.exists() && extra_rotation != 0 {
+        rotate_in_process(id, extra_rotation)?;
+    }
+    let frames = FrameFile::open(&path).map_err(|e| e.to_string())?;
+    fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    if frames.len() == 1 {
+        let out = out_dir.join(format!("{id}.jpg"));
+        fs::write(&out, frames.read(0).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        return Ok(out.display().to_string());
+    }
+    let out = out_dir.join(format!("{id}.mp4"));
+    let total: Duration = (0..frames.len()).map(|i| frames.delay(i)).sum();
+    let fps = ((frames.len() as f32 / total.as_secs_f32().max(0.001)).round() as u32).clamp(1, media::MAX_FPS);
+    let decoded = (0..frames.len()).map(|i| {
+        let jpeg = frames.read(i).map_err(|e| e.to_string())?;
+        let img = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+        Ok((img.into_rgba8(), frames.delay(i)))
+    });
+    video::encode_mp4(&out, render::SIZE, fps, decoded)?;
+    Ok(out.display().to_string())
 }
 
 /// Decodes a stored 480x480 JPEG frame back into a canvas (for previews and rotation).

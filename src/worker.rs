@@ -2,6 +2,7 @@
 //! streams it, keeps realtime mode alive and reconnects when the cooler
 //! disappears (USB reset, sleep/resume).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
@@ -94,7 +95,47 @@ type ItemKey = (String, u16);
 enum Msg {
     Config(Config),
     Loaded(ItemKey, Result<FrameFile, String>),
+    Storage(StorageOp),
     Quit,
+}
+
+/// Changes to the device's stored media (played when no host streams).
+pub enum StorageOp {
+    /// Replace slot `n` with a JPEG or MP4 file.
+    Store(usize, PathBuf),
+    Clear(usize),
+    /// Re-read which slots are filled.
+    Query,
+}
+
+pub enum StorageEvent {
+    /// Which slots hold a file.
+    Slots(Vec<bool>),
+    Stored(usize),
+    Failed(usize, String),
+}
+
+/// Runs one storage operation; returns the slot it touched.
+fn run_storage(d: &mut Atmos, op: &StorageOp) -> std::io::Result<Option<usize>> {
+    let clear = |d: &mut Atmos, slot: usize| -> std::io::Result<()> {
+        // A slot holds either kind; remove both like MasterCTRL does.
+        for ext in ["mp4", "jpg"] {
+            d.delete_media(&format!("suspend_{slot}.{ext}"), "suspend")?;
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        Ok(())
+    };
+    match op {
+        StorageOp::Store(slot, file) => {
+            let data = std::fs::read(file)?;
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("jpg").to_ascii_lowercase();
+            clear(d, *slot)?;
+            d.upload(&format!("suspend_{slot}.{ext}"), "suspend", &data)?;
+            Ok(Some(*slot))
+        }
+        StorageOp::Clear(slot) => clear(d, *slot).map(|_| Some(*slot)),
+        StorageOp::Query => Ok(None),
+    }
 }
 
 /// First frame of the unrotated item, for the preview.
@@ -123,6 +164,7 @@ pub struct Hooks {
     /// Each newly shown still (unrotated), or an animation's first frame, for the preview.
     pub frame: Box<dyn Fn(&Pixmap) + Send>,
     pub status: Box<dyn Fn(Status) + Send>,
+    pub storage: Box<dyn Fn(StorageEvent) + Send>,
 }
 
 impl Worker {
@@ -149,12 +191,18 @@ impl Worker {
             let mut content_error: Option<String> = None;
             // Settings that must be pushed to the device (on change or reconnect).
             let mut dirty = true;
+            let mut storage_ops = std::collections::VecDeque::from([StorageOp::Query]);
 
             loop {
                 let mut wake = next_draw.min(next_send);
                 wake = if dev.is_some() { wake.min(next_keepalive) } else { wake.min(next_connect) };
                 match rx.recv_timeout(wake.saturating_duration_since(Instant::now())) {
                     Ok(Msg::Config(new)) => {
+                        if new.offline != config.offline {
+                            // Hand the screen to the stored media (or take it back) right away.
+                            next_keepalive = Instant::now();
+                            next_send = Instant::now();
+                        }
                         config = new;
                         dirty = true;
                         next_draw = Instant::now();
@@ -170,6 +218,10 @@ impl Worker {
                             next_draw = Instant::now();
                         }
                     }
+                    Ok(Msg::Storage(op)) => {
+                        storage_ops.push_back(op);
+                        next_send = Instant::now();
+                    }
                     Ok(Msg::Quit) | Err(RecvTimeoutError::Disconnected) => break,
                     Err(RecvTimeoutError::Timeout) => {}
                 }
@@ -178,7 +230,8 @@ impl Worker {
                 if now >= next_draw {
                     // Files don't change by themselves; they wait for the next config or load result.
                     next_draw = now + Duration::from_secs(3600);
-                    if config.screen != "gallery" {
+                    // Offline only previews gallery items; nothing is streamed.
+                    if !config.offline && config.screen != "gallery" {
                         let canvas = renderer.draw(&config);
                         (hooks.frame)(&canvas);
                         playing = Playing::Still(render::to_jpeg(&render::rotate(&canvas, config.split_rotation().1)));
@@ -232,6 +285,7 @@ impl Worker {
                             dev = Some(d);
                             dirty = true;
                             next_keepalive = now;
+                            storage_ops.push_back(StorageOp::Query);
                         }
                         Err(_) => set_status(Status::NotFound),
                     }
@@ -250,10 +304,37 @@ impl Worker {
                 };
 
                 let result = (|| -> std::io::Result<()> {
+                    if !storage_ops.is_empty() {
+                        while let Some(op) = storage_ops.pop_front() {
+                            match run_storage(d, &op) {
+                                Ok(Some(slot)) if matches!(op, StorageOp::Store(..)) => {
+                                    (hooks.storage)(StorageEvent::Stored(slot))
+                                }
+                                Ok(_) => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::Other => {
+                                    // Refused by the device; the connection itself is fine.
+                                    if let StorageOp::Store(slot, _) | StorageOp::Clear(slot) = op {
+                                        (hooks.storage)(StorageEvent::Failed(slot, e.to_string()));
+                                    }
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        (hooks.storage)(StorageEvent::Slots(d.suspend_slots()?));
+                        // Uploads take a while; make sure realtime mode didn't lapse.
+                        next_keepalive = Instant::now();
+                    }
                     if dirty {
                         d.set_brightness(config.brightness)?;
                         d.set_rotation(config.split_rotation().0)?;
+                        if config.offline {
+                            d.set_realtime(false)?;
+                        }
                         dirty = false;
+                    }
+                    // Offline: the cooler plays its stored media; only settings are sent.
+                    if config.offline {
+                        return Ok(());
                     }
                     if now >= next_keepalive {
                         d.keep_realtime_alive()?;
@@ -286,6 +367,11 @@ impl Worker {
     pub fn apply(&self, config: Config) {
         let _ = self.tx.send(Msg::Config(config));
     }
+
+    pub fn storage(&self, op: StorageOp) {
+        let _ = self.tx.send(Msg::Storage(op));
+    }
+
 }
 
 impl Drop for Worker {

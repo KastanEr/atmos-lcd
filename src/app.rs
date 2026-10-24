@@ -16,7 +16,8 @@ use crate::config::Config;
 use crate::gallery;
 use crate::render::SIZE;
 use crate::video;
-use crate::worker::{Hooks, Status, Worker};
+use crate::slots;
+use crate::worker::{Hooks, Status, StorageEvent, StorageOp, Worker};
 
 slint::include_modules!();
 
@@ -26,6 +27,7 @@ const ROTATION_STEP: u16 = 60;
 /// Tray menu items whose check marks mirror the config.
 struct TrayMenu {
     open: MenuItem,
+    offline: CheckMenuItem,
     autostart: CheckMenuItem,
     quit: MenuItem,
     screens: Vec<CheckMenuItem>,
@@ -35,6 +37,7 @@ struct TrayMenu {
 impl TrayMenu {
     fn build() -> (Menu, TrayMenu) {
         let open = MenuItem::new("설정 열기", true, None);
+        let offline = CheckMenuItem::new("오프라인 모드 (쿨러 저장 화면)", true, false, None);
         let autostart = CheckMenuItem::new("Windows 시작 시 자동 실행", true, autostart::is_enabled(), None);
         let quit = MenuItem::new("종료", true, None);
         let screens: Vec<_> = SCREENS.iter().map(|(_, label)| CheckMenuItem::new(*label, true, false, None)).collect();
@@ -52,10 +55,11 @@ impl TrayMenu {
             menu.append(item).expect("append menu item");
         }
         menu.append(&rotation_menu).expect("append menu item");
+        menu.append(&offline).expect("append menu item");
         menu.append(&PredefinedMenuItem::separator()).expect("append menu item");
         menu.append(&autostart).expect("append menu item");
         menu.append(&quit).expect("append menu item");
-        (menu, TrayMenu { open, autostart, quit, screens, rotations })
+        (menu, TrayMenu { open, offline, autostart, quit, screens, rotations })
     }
 
     fn sync(&self, config: &Config) {
@@ -65,6 +69,7 @@ impl TrayMenu {
         for (i, item) in self.rotations.iter().enumerate() {
             item.set_checked(config.rotation == i as u16 * ROTATION_STEP);
         }
+        self.offline.set_checked(config.offline);
     }
 }
 
@@ -121,6 +126,10 @@ struct App {
     window: AppWindow,
     tray: TrayMenu,
     importer: Importer,
+    /// Filled state of the cooler's stored-media slots, as last reported.
+    device_slots: Vec<bool>,
+    /// Slots being exported or uploaded, with the gallery item going in.
+    storing: Vec<Option<(String, String)>>,
 }
 
 impl App {
@@ -206,6 +215,78 @@ impl App {
         });
     }
 
+    fn refresh_slots(&self) {
+        let tiles: Vec<SlotTile> = (0..slots::COUNT)
+            .map(|i| {
+                let name = slots::name(i).unwrap_or_default();
+                let thumb = if name.is_empty() { Image::default() } else { load_image(&slots::thumb_path(i)) };
+                SlotTile {
+                    thumb,
+                    name: name.into(),
+                    filled: self.device_slots.get(i).copied().unwrap_or(false),
+                    busy: self.storing[i].is_some(),
+                }
+            })
+            .collect();
+        self.window.set_slots(ModelRc::new(VecModel::from(tiles)));
+    }
+
+    /// Exports gallery item `id` and uploads it into `slot`.
+    fn store_slot(&mut self, slot: usize, id: String) {
+        if self.storing[slot].is_some() {
+            return;
+        }
+        let name = gallery::list().into_iter().find(|i| i.id == id).map(|i| i.name).unwrap_or_default();
+        self.storing[slot] = Some((id.clone(), name));
+        self.refresh_slots();
+        let rotation = self.config.split_rotation().1 as u16;
+        std::thread::spawn(move || {
+            let exported = gallery::export(&id, rotation, &gallery::export_dir());
+            with_app(move |app| match exported {
+                Ok(file) => app.worker.storage(StorageOp::Store(slot, file)),
+                Err(e) => app.storage_event(StorageEvent::Failed(slot, e)),
+            });
+        });
+    }
+
+    fn clear_slot(&mut self, slot: usize) {
+        slots::forget(slot);
+        self.worker.storage(StorageOp::Clear(slot));
+    }
+
+    fn toggle_offline(&mut self) {
+        let c = Config { offline: !self.config.offline, ..self.config.clone() };
+        self.apply(c);
+    }
+
+    fn storage_event(&mut self, event: StorageEvent) {
+        match event {
+            StorageEvent::Slots(filled) => {
+                // Forget records for slots emptied elsewhere (e.g. by MasterCTRL).
+                for (i, f) in filled.iter().enumerate() {
+                    if !f && self.storing.get(i).is_some_and(Option::is_none) {
+                        slots::forget(i);
+                    }
+                }
+                self.device_slots = filled;
+            }
+            StorageEvent::Stored(slot) => {
+                if let Some((id, name)) = self.storing[slot].take() {
+                    let _ = std::fs::remove_dir_all(gallery::export_dir().join(&id));
+                    // The slot's thumbnail shows the result; only failures need words.
+                    if let Err(e) = slots::record(slot, &id, &name) {
+                        self.window.set_status(format!("슬롯 기록 실패: {e}").into());
+                    }
+                }
+            }
+            StorageEvent::Failed(slot, e) => {
+                self.storing[slot] = None;
+                self.window.set_status(format!("슬롯 {} 저장 실패: {e}", slot + 1).into());
+            }
+        }
+        self.refresh_slots();
+    }
+
     /// Updates the registry and the tray check mark.
     fn set_autostart(&self, enabled: bool) {
         if let Err(e) = autostart::set_enabled(enabled) {
@@ -218,6 +299,8 @@ impl App {
     fn handle_menu(&mut self, id: &MenuId) {
         if id == self.tray.open.id() {
             show_window(&self.window);
+        } else if id == self.tray.offline.id() {
+            self.toggle_offline();
         } else if id == self.tray.autostart.id() {
             // The check mark already toggled itself; treat it as the requested state.
             self.set_autostart(self.tray.autostart.is_checked());
@@ -258,10 +341,15 @@ fn load_into_window(w: &AppWindow, c: &Config) {
     w.set_brightness(c.brightness as f32);
     w.set_rotation_index((c.rotation / ROTATION_STEP) as i32);
     w.set_selected_id(c.item.as_deref().unwrap_or("").into());
+    w.set_offline(c.offline);
 }
 
 fn load_thumb(id: &str) -> Image {
-    let Ok(img) = image::open(gallery::thumb_path(id)) else { return Image::default() };
+    load_image(&gallery::thumb_path(id))
+}
+
+fn load_image(path: &std::path::Path) -> Image {
+    let Ok(img) = image::open(path) else { return Image::default() };
     let img = img.into_rgba8();
     Image::from_rgba8(SharedPixelBuffer::clone_from_slice(img.as_raw(), img.width(), img.height()))
 }
@@ -348,6 +436,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     w.set_status(text.into());
                 });
             }),
+            storage: Box::new(|event| with_app(move |app| app.storage_event(event))),
         }
     };
     let worker = Worker::spawn(config.clone(), hooks);
@@ -360,7 +449,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_icon(tray_icon_image())
         .build()?;
 
-    let app = Rc::new(RefCell::new(App { config, worker, window: window.clone_strong(), tray, importer: Importer::spawn() }));
+    let app = Rc::new(RefCell::new(App {
+        config,
+        worker,
+        window: window.clone_strong(),
+        tray,
+        importer: Importer::spawn(),
+        device_slots: vec![false; slots::COUNT],
+        storing: vec![None; slots::COUNT],
+    }));
+    app.borrow().refresh_slots();
     app.borrow_mut().refresh_gallery();
 
     // Tray events may arrive outside Slint's event loop; hop onto it.
@@ -415,6 +513,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.borrow_mut().delete_item(&id);
             }
         });
+    }
+    {
+        let app = app.clone();
+        window.on_drop_item(move |id, i| {
+            let slot = i as usize;
+            let filled = app.borrow().device_slots.get(slot) == Some(&true);
+            // Replacing content is not undoable; ask first. No borrow is held while the dialog is open.
+            if filled
+                && rfd::MessageDialog::new()
+                    .set_title("쿨러 저장공간")
+                    .set_description(format!("슬롯 {}의 내용을 바꿀까요?", slot + 1))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    != rfd::MessageDialogResult::Yes
+            {
+                return;
+            }
+            app.borrow_mut().store_slot(slot, id.to_string());
+        });
+    }
+    {
+        let app = app.clone();
+        window.on_clear_slot(move |i| app.borrow_mut().clear_slot(i as usize));
+    }
+    {
+        let app = app.clone();
+        window.on_toggle_offline(move || app.borrow_mut().toggle_offline());
     }
     // Open the window on first run so a new user sees something; later starts stay in the tray.
     if !Config::exists() {

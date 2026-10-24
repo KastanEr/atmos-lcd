@@ -13,7 +13,10 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFDXGIDeviceManager, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_PD_DURATION, MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MFCreateDXGIDeviceManager, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    IMFMediaType, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_INTERLACE_MODE,
+    MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_PD_DURATION, MF_SOURCE_READER_D3D_MANAGER,
+    MF_SOURCE_READER_MEDIASOURCE, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
+    MFVideoFormat_H264, MFVideoInterlace_Progressive, eAVEncH264VProfile_Base, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MFCreateDXGIDeviceManager, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
     MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes,
     MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
@@ -252,4 +255,76 @@ impl Drop for MediaFoundation {
             CoUninitialize();
         }
     }
+}
+
+/// Encodes square RGBA frames (with display durations) into an H.264 MP4 the cooler can
+/// store and play by itself. Settings follow MasterCTRL's ffmpeg call: ~2 Mbps, yuv420p,
+/// `moov` before `mdat`. Baseline profile keeps the device's decoder on safe ground.
+pub fn encode_mp4(
+    out: &Path,
+    size: u32,
+    fps: u32,
+    frames: impl Iterator<Item = Result<(RgbaImage, Duration), String>>,
+) -> Result<(), String> {
+    let _mf = MediaFoundation::start().map_err(|e| format!("Media Foundation: {e}"))?;
+    let err = |e: windows::core::Error| format!("MP4 encoder: {}", e.message());
+    unsafe {
+        let mut attrs: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs, 2).map_err(err)?;
+        let attrs = attrs.expect("MFCreateAttributes succeeded");
+        attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1).map_err(err)?;
+        let writer = MFCreateSinkWriterFromURL(&HSTRING::from(out.as_os_str()), None, &attrs).map_err(err)?;
+
+        let frame_size = (size as u64) << 32 | size as u64;
+        let frame_rate = (fps as u64) << 32 | 1;
+        let common = |t: &IMFMediaType| -> windows::core::Result<()> {
+            t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+            t.SetUINT64(&MF_MT_FRAME_SIZE, frame_size)?;
+            t.SetUINT64(&MF_MT_FRAME_RATE, frame_rate)?;
+            t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, 1u64 << 32 | 1)?;
+            t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+        };
+        let encoded = MFCreateMediaType().map_err(err)?;
+        common(&encoded).map_err(err)?;
+        encoded.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(err)?;
+        encoded.SetUINT32(&MF_MT_AVG_BITRATE, 2_000_000).map_err(err)?;
+        encoded.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32).map_err(err)?;
+        let stream = writer.AddStream(&encoded).map_err(err)?;
+
+        let input = MFCreateMediaType().map_err(err)?;
+        common(&input).map_err(err)?;
+        input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).map_err(err)?;
+        // Positive stride: rows are stored top-down.
+        input.SetUINT32(&MF_MT_DEFAULT_STRIDE, size * 4).map_err(err)?;
+        writer.SetInputMediaType(stream, &input, None).map_err(err)?;
+        writer.BeginWriting().map_err(err)?;
+
+        let len = size * size * 4;
+        let mut time = 0i64;
+        for frame in frames {
+            let (img, delay) = frame?;
+            if img.width() != size || img.height() != size {
+                return Err(format!("frame is {}x{}, expected {size}x{size}", img.width(), img.height()));
+            }
+            let buffer = MFCreateMemoryBuffer(len).map_err(err)?;
+            let mut data = std::ptr::null_mut();
+            buffer.Lock(&mut data, None, None).map_err(err)?;
+            let dst = std::slice::from_raw_parts_mut(data, len as usize);
+            for (d, s) in dst.chunks_exact_mut(4).zip(img.as_raw().chunks_exact(4)) {
+                d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+            }
+            buffer.Unlock().map_err(err)?;
+            buffer.SetCurrentLength(len).map_err(err)?;
+
+            let duration = (delay.as_nanos() / 100).max(1) as i64;
+            let sample = MFCreateSample().map_err(err)?;
+            sample.AddBuffer(&buffer).map_err(err)?;
+            sample.SetSampleTime(time).map_err(err)?;
+            sample.SetSampleDuration(duration).map_err(err)?;
+            writer.WriteSample(stream, &sample).map_err(err)?;
+            time += duration;
+        }
+        writer.Finalize().map_err(err)?;
+    }
+    Ok(())
 }
