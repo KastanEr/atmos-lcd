@@ -16,11 +16,13 @@ use tiny_skia::Pixmap;
 
 use crate::{render, video};
 
-/// MasterCTRL's capability list allows 15 fps; faster frames are merged.
-const MIN_FRAME: Duration = Duration::from_millis(66);
+/// Frame rate cap. The panel refreshes at 60 Hz and USB carries ~110 fps of
+/// typical frames (`bench`), so 60 fps is the useful maximum; faster frames are merged.
+pub const MAX_FPS: u32 = 60;
+const MIN_FRAME: Duration = Duration::from_millis(1000 / MAX_FPS as u64);
 /// Browsers treat GIF delays of 0-10 ms as "unspecified"; this is their usual substitute.
 const DEFAULT_DELAY: Duration = Duration::from_millis(100);
-/// Longer videos are cut to bound memory (about 0.6 MB per second at 15 fps).
+/// Longer videos are cut to bound gallery size (about 3 MB per second at 60 fps).
 const MAX_VIDEO: Duration = Duration::from_secs(60);
 
 pub struct Frame {
@@ -187,15 +189,27 @@ mod tests {
     }
 
     #[test]
-    fn gif_frames_are_paced_and_merged() {
+    fn gif_unspecified_delay_uses_default() {
         let path = std::env::temp_dir().join("atmos-lcd-test.gif");
-        // Two normal frames, two 20 ms frames that must merge, one "unspecified" delay.
-        write_gif(&path, &[100, 100, 20, 20, 0]);
+        write_gif(&path, &[100, 20, 0]);
         let anim = load_animation(&path, 0.0).unwrap().expect("animated");
         let delays: Vec<u128> = anim.frames.iter().map(|f| f.delay.as_millis()).collect();
-        assert_eq!(delays, [100, 100, 40, 100]);
+        assert_eq!(delays, [100, 20, 100]);
         assert_eq!(&anim.frames[0].wire[..2], &[0xFF, 0xD8]);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runs_of_short_frames_are_merged() {
+        let ms = Duration::from_millis;
+        let mut builder = Builder::new(0.0);
+        // Two 8 ms frames exceed 60 fps and merge; the following normal frame stays.
+        for delay in [100, 100, 8, 8, 100] {
+            builder.push(DynamicImage::new_rgba8(64, 64), ms(delay));
+        }
+        let anim = builder.finish(false).expect("animated");
+        let delays: Vec<Duration> = anim.frames.iter().map(|f| f.delay).collect();
+        assert_eq!(delays, [ms(100), ms(100), ms(16), ms(100)]);
     }
 
     #[test]

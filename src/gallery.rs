@@ -162,12 +162,13 @@ pub fn import_in_process(source: &Path) -> Result<String, String> {
         let duration: Duration = frames.iter().map(|(_, d)| *d).sum();
         let added = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let info = format!(
-            "name={}\nsource={}\nframes={}\nduration_ms={}\nbytes={bytes}\nadded={added}\ntruncated={}\n",
+            "name={}\nsource={}\nframes={}\nduration_ms={}\nbytes={bytes}\nadded={added}\ntruncated={}\nmax_fps={}\n",
             name.replace('\n', " "),
             source.display(),
             frames.len(),
             duration.as_millis(),
             matches!(&media, Media::Animated(a) if a.truncated),
+            media::MAX_FPS,
         );
         fs::write(tmp.join("info.txt"), info)?;
         fs::rename(&tmp, &dir)?;
