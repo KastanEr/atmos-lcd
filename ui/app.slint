@@ -624,7 +624,7 @@ export component AppWindow inherits Window {
                             text: Math.round(root.brightness) + "%";
                             width: 36px;
                             font-size: 13px;
-                            color: Theme.secondary;
+                            color: Theme.text;
                             horizontal-alignment: right;
                             vertical-alignment: center;
                         }
@@ -639,8 +639,8 @@ export component AppWindow inherits Window {
                         padding-top: Theme.row-pad;
                         padding-bottom: Theme.row-pad;
                         spacing: 12px;
-                        alignment: center;
-                        // Rotation in 30-degree steps, wrapping around.
+                        // Rotation in 30-degree steps, wrapping around: buttons at both
+                        // ends, the angle centered between them.
                         RotateButton {
                             clockwise: false;
                             clicked => {
@@ -650,7 +650,7 @@ export component AppWindow inherits Window {
                         }
                         Text {
                             text: (root.rotation-index * 30) + "°";
-                            width: 44px;
+                            horizontal-stretch: 1;
                             font-size: 13px;
                             color: Theme.text;
                             horizontal-alignment: center;
