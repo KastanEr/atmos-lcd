@@ -545,7 +545,7 @@ export component AppWindow inherits Window {
                             color: Theme.text;
                         }
                         Segmented {
-                            items: ["시스템", "시계", "갤러리"];
+                            items: ["시스템", "시계", "미디어"];
                             current: root.offline ? 2 : root.screen-index;
                             enabled: !root.offline;
                             activated(i) => {

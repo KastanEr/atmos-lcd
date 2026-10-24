@@ -21,7 +21,7 @@ use crate::worker::{Hooks, Status, StorageEvent, StorageOp, Worker};
 
 slint::include_modules!();
 
-const SCREENS: [(&str, &str); 3] = [("system", "시스템 (CPU / GPU)"), ("clock", "시계"), ("gallery", "갤러리")];
+const SCREENS: [(&str, &str); 3] = [("system", "시스템 (CPU / GPU)"), ("clock", "시계"), ("gallery", "미디어")];
 const ROTATION_STEP: u16 = 60;
 
 /// Tray menu items whose check marks mirror the config.
