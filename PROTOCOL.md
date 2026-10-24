@@ -102,7 +102,11 @@ Storing a file into slot N (MasterCTRL's order, verified on hardware):
 
 Accepted formats: 480x480 baseline JPEG; H.264 MP4 at 480x480 (Windows' Media
 Foundation encoder, baseline profile, ~2 Mbps; `moov` after `mdat` plays fine).
-Storage appears to be about 20 MB (`0x01400000` in feature report 0x14), not yet verified.
+Capacity: at least ~275 MB in total and 100 MB per file, verified by filling all five
+slots with files that have padding (a `free` box) before `moov` and checking each still
+plays, which proves the whole file was stored. The `0x01400000` (20 MiB) value in feature
+report 0x14 is therefore not the storage size. After a large file the device can take
+several seconds to answer the next `transport`/`transported`; wait up to ~30 s.
 
 Rotation for stored media follows the firmware `rotate` setting (90° steps); other
 angles must be applied to the file before uploading.

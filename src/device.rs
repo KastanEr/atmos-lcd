@@ -17,6 +17,10 @@ const REALTIME_FLAG: u8 = 1;
 /// Data chunk flag for files announced by a `transport` command.
 const FILE_FLAG: u8 = 0;
 
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Storage commands can wait while the device writes a previous file to flash.
+const STORAGE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How often realtime mode must be refreshed; the device's keepAliveTimeout is 5 s.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4);
 
@@ -43,17 +47,21 @@ impl Atmos {
 
     /// Sends a command and waits for its response text.
     pub fn request(&self, method: &str, name: &str, json: &str, seq: u32) -> io::Result<String> {
+        self.request_within(method, name, json, seq, RESPONSE_TIMEOUT)
+    }
+
+    fn request_within(&self, method: &str, name: &str, json: &str, seq: u32, timeout: Duration) -> io::Result<String> {
         let date = unix_time().as_secs();
         let text = format!(
             "{method} {name} 1\r\nSeqNumber={seq}\r\nDate={date}\r\nContentType=json\r\nContentLength={}\r\n\r\n{json}",
             json.len()
         );
-        self.exchange(&text)
+        self.exchange(&text, timeout)
     }
 
     /// Current device parameters as JSON (brightness, degree, keepAliveTimeout, ...).
     pub fn params(&self) -> io::Result<String> {
-        let reply = self.exchange("POST param 1\r\n")?;
+        let reply = self.exchange("POST param 1\r\n", RESPONSE_TIMEOUT)?;
         Ok(body(&reply).to_string())
     }
 
@@ -88,7 +96,7 @@ impl Atmos {
     /// and `logo` (`logo_0.mp4`).
     pub fn upload(&mut self, file_name: &str, kind: &str, data: &[u8]) -> io::Result<()> {
         let announce = format!("{{\"fileName\":\"{file_name}\",\"fileSize\":{},\"type\":\"{kind}\"}}", data.len());
-        expect_success(&self.request("POST", "transport", &announce, 42)?)?;
+        expect_success(&self.request_within("POST", "transport", &announce, 42, STORAGE_TIMEOUT)?)?;
         // Pauses as in MasterCTRL; the device prepares storage after `transport`.
         std::thread::sleep(Duration::from_millis(300));
         self.send_data(data, FILE_FLAG)?;
@@ -97,7 +105,7 @@ impl Atmos {
         let _ = self.responses.recv_timeout(Duration::from_secs(5));
         // MasterCTRL always sends this placeholder checksum.
         let done = format!("{{\"fileName\":\"{file_name}\",\"md5\":1111111}}");
-        expect_success(&self.request("POST", "transported", &done, 42)?)
+        expect_success(&self.request_within("POST", "transported", &done, 42, STORAGE_TIMEOUT)?)
     }
 
     /// Which of the stored-media slots hold a file (`suspend_<i>`).
@@ -134,12 +142,12 @@ impl Atmos {
         self.hid.write_all(&reports)
     }
 
-    fn exchange(&self, text: &str) -> io::Result<String> {
+    fn exchange(&self, text: &str, timeout: Duration) -> io::Result<String> {
         while self.responses.try_recv().is_ok() {}
         self.hid.write(&encode_command(text.as_bytes()))?;
         let report = self
             .responses
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(timeout)
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no response from device"))?;
         decode_response(&report)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed response"))
