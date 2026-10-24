@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -136,6 +136,10 @@ struct App {
     scale: f32,
     /// Latest unrotated preview frame (480x480 RGBA), kept to redo it at a new scale.
     last_frame: Option<Vec<u8>>,
+    /// Tells the worker whether animation frames are wanted (window open, not minimized).
+    preview_live: Arc<AtomicBool>,
+    /// Watches for the minimized window to be restored.
+    restore_timer: slint::Timer,
 }
 
 /// A gallery item on its way into a storage slot.
@@ -187,6 +191,7 @@ impl App {
     fn show(&mut self) {
         let _ = self.window.show();
         self.window.window().set_minimized(false);
+        self.preview_live.store(true, Ordering::Relaxed);
         self.rescale();
         // The scale factor can settle only once the native window exists.
         self.notice_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(200), || {
@@ -209,10 +214,31 @@ impl App {
     }
 
     fn set_preview_frame(&mut self, rgba: Vec<u8>) {
-        if let Some(img) = image::RgbaImage::from_raw(SIZE, SIZE, rgba.clone()) {
-            self.window.set_preview(display_image(&img, PREVIEW_SIZE, PREVIEW_RADIUS, self.scale));
+        // Nothing is painted while minimized; pause animation frames until the window is back.
+        if self.window.window().is_minimized() {
+            self.last_frame = Some(rgba);
+            self.preview_live.store(false, Ordering::Relaxed);
+            self.restore_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(500), || {
+                with_app(|app| app.resume_preview());
+            });
+            return;
         }
-        self.last_frame = Some(rgba);
+        let img = image::RgbaImage::from_raw(SIZE, SIZE, rgba).expect("preview frame size");
+        self.window.set_preview(display_image(&img, PREVIEW_SIZE, PREVIEW_RADIUS, self.scale));
+        self.last_frame = Some(img.into_raw());
+    }
+
+    fn resume_preview(&mut self) {
+        if !self.window.window().is_visible() {
+            // Closed to the tray meanwhile; `show` turns frames back on.
+            self.restore_timer.stop();
+        } else if !self.window.window().is_minimized() {
+            self.restore_timer.stop();
+            self.preview_live.store(true, Ordering::Relaxed);
+            if let Some(frame) = self.last_frame.take() {
+                self.set_preview_frame(frame);
+            }
+        }
     }
 
     /// Shows a short message under the status badge for a few seconds.
@@ -584,9 +610,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let window = AppWindow::new()?;
     load_into_window(&window, &config);
 
+    let preview_live = Arc::new(AtomicBool::new(false));
     let hooks = {
         let status_window = window.as_weak();
         Hooks {
+            preview: preview_live.clone(),
             frame: Box::new(move |pixmap| {
                 // Always store it: static screens (images) are drawn only once, possibly
                 // while the window is hidden. A hidden window does not repaint, so this is cheap.
@@ -632,6 +660,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Unknown until the window is shown; `rescale` replaces it.
         scale: 0.0,
         last_frame: None,
+        preview_live: preview_live.clone(),
+        restore_timer: slint::Timer::default(),
     }));
     app.borrow_mut().rescale();
     app.borrow().refresh_slots();
@@ -726,6 +756,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.borrow_mut().show();
     }
     // Closing the window only hides it; the app lives in the tray until "종료".
+    window.window().on_close_requested(move || {
+        preview_live.store(false, Ordering::Relaxed);
+        slint::CloseRequestResponse::HideWindow
+    });
     slint::run_event_loop_until_quit()?;
     APP.with(|a| *a.borrow_mut() = None);
     Ok(())

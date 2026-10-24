@@ -30,6 +30,7 @@ usage: atmos-lcd [command]
   rotate <degrees>              e.g. 60 for a hexagonal pump; saved to config
   run <screen>                  show a screen in the foreground until Ctrl+C
   preview <screen> <out.jpg>    render a screen to a file without the device
+  stats                         print CPU and GPU readings for a few seconds
   gallery                       list gallery items
   import <file>                 add a picture, GIF/WebP or video to the gallery
   bench <id> [fps...]           measure frame transfer speed with a gallery item
@@ -98,10 +99,19 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             Atmos::open()?.set_rotation(config.split_rotation().0)?;
             println!("rotation {} saved", config.rotation);
         }
+        "stats" => {
+            let mut stats = stats::Stats::new();
+            for _ in 0..5 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let s = stats.sample();
+                println!("cpu {:.1}% gpu {:?}C {:?}%", s.cpu_load, s.gpu_temp, s.gpu_load);
+            }
+        }
         "run" => {
             let (config, _) = with_screen(&args[1..], Config::load())?;
             let hooks = Hooks {
                 frame: Box::new(|_| {}),
+                preview: Default::default(),
                 status: Box::new(|s| eprintln!("{s:?}")),
                 storage: Box::new(|_| {}),
             };
@@ -129,7 +139,7 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 let mut renderer = Renderer::new();
                 // CPU load needs two samples to measure an interval.
                 renderer.draw(&config);
-                std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 (render::to_jpeg(&render::rotate(&renderer.draw(&config), rotation)), rest.first().ok_or(USAGE)?.as_str())
             };
             std::fs::write(out, jpeg)?;

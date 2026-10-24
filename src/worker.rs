@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -21,6 +22,8 @@ use crate::stats::Stats;
 const RESEND_INTERVAL: Duration = Duration::from_millis(500);
 const LIVE_REDRAW: Duration = Duration::from_secs(1);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
+/// Animated previews are thinned to this; the window is small and the cooler gets every frame.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -170,8 +173,10 @@ pub struct Worker {
 
 /// Callbacks run on the worker thread.
 pub struct Hooks {
-    /// Each newly shown still (unrotated), or an animation's first frame, for the preview.
+    /// Each newly shown still (unrotated) and, while `preview` is set, animation frames.
     pub frame: Box<dyn Fn(&Pixmap) + Send>,
+    /// Whether the window is open to show animation frames; they are skipped otherwise.
+    pub preview: Arc<AtomicBool>,
     pub status: Box<dyn Fn(Status) + Send>,
     pub storage: Box<dyn Fn(StorageEvent) + Send>,
 }
@@ -196,6 +201,9 @@ impl Worker {
             let mut playing = Playing::Nothing;
             let mut item: Option<(ItemKey, Arc<FrameFile>)> = None;
             let mut loading: Option<ItemKey> = None;
+            // Unrotated frames of the playing animation, for the preview.
+            let mut preview_file: Option<Arc<FrameFile>> = None;
+            let mut next_preview = now;
             // Problem with what is shown, reported instead of a plain "connected".
             let mut content_error: Option<String> = None;
             // Settings that must be pushed to the device (on change or reconnect).
@@ -244,6 +252,7 @@ impl Worker {
                         let canvas = renderer.draw(&config);
                         (hooks.frame)(&canvas);
                         playing = Playing::Still(render::to_jpeg(&render::rotate(&canvas, config.split_rotation().1)));
+                        preview_file = None;
                         content_error = None;
                         next_draw = now + LIVE_REDRAW;
                         next_send = now;
@@ -256,6 +265,7 @@ impl Worker {
                                     if let Some(poster) = item_poster(id) {
                                         (hooks.frame)(&poster);
                                     }
+                                    preview_file = None;
                                     playing = if file.len() == 1 {
                                         match file.read(0) {
                                             Ok(jpeg) => Playing::Still(jpeg),
@@ -265,6 +275,11 @@ impl Worker {
                                             }
                                         }
                                     } else {
+                                        preview_file = if key.1 == 0 {
+                                            Some(file.clone())
+                                        } else {
+                                            FrameFile::open(&gallery::frames_path(id, 0)).ok().map(Arc::new)
+                                        };
                                         Playing::Frames { file: file.clone(), index: 0, buf: Vec::new() }
                                     };
                                 }
@@ -305,6 +320,14 @@ impl Worker {
                 if send_due {
                     // Animations keep their timing even while the cooler is unplugged.
                     next_send = now + playing.interval();
+                    if let (Playing::Frames { index, .. }, Some(file)) = (&playing, &preview_file)
+                        && now >= next_preview
+                        && hooks.preview.load(Ordering::Relaxed)
+                        && let Ok(frame) = file.read(*index).map_err(|e| e.to_string()).and_then(|j| gallery::decode_frame(&j).map_err(|e| e.to_string()))
+                    {
+                        (hooks.frame)(&frame);
+                        next_preview = now + PREVIEW_INTERVAL;
+                    }
                 }
                 let Some(d) = dev.as_mut() else {
                     if send_due {
@@ -345,6 +368,8 @@ impl Worker {
                     }
                     // Offline: the cooler plays its stored media; only settings are sent.
                     if config.offline {
+                        // No keepalive either; without this the loop would wake for it nonstop.
+                        next_keepalive = now + KEEPALIVE_INTERVAL;
                         return Ok(());
                     }
                     if now >= next_keepalive {
