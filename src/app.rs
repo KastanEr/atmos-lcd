@@ -460,7 +460,7 @@ fn load_into_window(w: &AppWindow, c: &Config) {
 const PREVIEW_SIZE: f32 = 208.0;
 const PREVIEW_RADIUS: f32 = 22.0;
 const TILE_SIZE: f32 = 110.0;
-const SLOT_SIZE: f32 = 164.0;
+const SLOT_SIZE: f32 = 110.0;
 const TILE_RADIUS: f32 = 10.0;
 /// The preview's shadow: blur radius, how far it drops, and its opacity.
 const SHADOW_BLUR: f32 = 14.0;

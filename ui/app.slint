@@ -401,14 +401,27 @@ component Slot inherits Rectangle {
         source: root.slot.thumb;
         image-fit: cover;
     }
-    if !root.slot.filled || root.slot.name == "": Text {
+    if root.slot.filled && root.slot.name == "": Text {
         width: parent.width;
         height: parent.height;
-        text: root.slot.filled ? "이전에\n저장됨" : "여기로\n끌어다 놓기";
+        text: "이전에\n저장됨";
         horizontal-alignment: center;
         vertical-alignment: center;
         font-size: 11px;
         color: Theme.secondary;
+    }
+    // Empty slot: an arrow dropping into a tray.
+    if !root.slot.filled: Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 28px;
+        height: 28px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M12 4 V14 M7.5 9.5 L12 14 L16.5 9.5 M4 15 V18 Q4 20 6 20 H18 Q20 20 20 18 V15";
+        stroke: root.drop-target ? Theme.accent : Theme.secondary;
+        stroke-width: 1.6px;
+        fill: transparent;
     }
     Rectangle {
         x: 6px;
@@ -839,7 +852,7 @@ export component AppWindow inherits Window {
                             color: Theme.text;
                         }
                         Text {
-                            text: "PC 연결이 없을 때 번갈아 재생해요 · 갤러리에서 끌어다 놓기";
+                            text: "PC 연결이 없을 때 번갈아 재생해요";
                             font-size: 12px;
                             color: Theme.secondary;
                             overflow: elide;
@@ -850,11 +863,11 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         spacing: Theme.gap;
+                        // Slots match the gallery tiles; the spare width becomes side margin.
+                        alignment: center;
                         for slot[i] in root.slots: Slot {
-                            // Five fill the fixed-width window's right column exactly:
-                            // 1280 - 2*24 margin - 300 left - 16 gap - 2*16 pad = 5*164 + 4*16.
-                            width: 164px;
-                            height: 164px;
+                            width: 110px;
+                            height: 110px;
                             slot: slot;
                             index: i;
                             drop-target: root.dragging
