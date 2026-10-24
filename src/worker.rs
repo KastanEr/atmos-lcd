@@ -27,8 +27,6 @@ pub enum Status {
     Connected,
     Loading,
     NotFound,
-    /// Connected, with nothing chosen to show yet; the text says what to do.
-    Idle(String),
     Error(String),
 }
 
@@ -200,8 +198,6 @@ impl Worker {
             let mut loading: Option<ItemKey> = None;
             // Problem with what is shown, reported instead of a plain "connected".
             let mut content_error: Option<String> = None;
-            // Nothing to show yet: not an error, just a pointer to what to do.
-            let mut hint: Option<String> = None;
             // Settings that must be pushed to the device (on change or reconnect).
             let mut dirty = true;
             let mut storage_ops = std::collections::VecDeque::from([StorageOp::Query]);
@@ -243,7 +239,6 @@ impl Worker {
                 if now >= next_draw {
                     // Files don't change by themselves; they wait for the next config or load result.
                     next_draw = now + Duration::from_secs(3600);
-                    hint = None;
                     // Offline only previews gallery items; nothing is streamed.
                     if !config.offline && config.screen != "gallery" {
                         let canvas = renderer.draw(&config);
@@ -288,11 +283,8 @@ impl Worker {
                             _ => {}
                         }
                     } else {
+                        // Nothing chosen yet is not a problem; the gallery shows what to pick.
                         content_error = None;
-                        // Offline mode plays the stored slots, so nothing needs choosing there.
-                        if !config.offline {
-                            hint = Some("갤러리에서 미디어를 선택하세요".into());
-                        }
                     }
                 }
 
@@ -368,11 +360,10 @@ impl Worker {
                     playing.advance();
                 }
                 match result {
-                    Ok(()) => set_status(match (&content_error, &loading, &hint) {
-                        (Some(e), _, _) => Status::Error(e.clone()),
-                        (None, Some(_), _) => Status::Loading,
-                        (None, None, Some(h)) => Status::Idle(h.clone()),
-                        (None, None, None) => Status::Connected,
+                    Ok(()) => set_status(match (&content_error, &loading) {
+                        (Some(e), _) => Status::Error(e.clone()),
+                        (None, Some(_)) => Status::Loading,
+                        (None, None) => Status::Connected,
                     }),
                     Err(e) => {
                         set_status(Status::Error(e.to_string()));
