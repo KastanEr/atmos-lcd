@@ -6,6 +6,7 @@ mod autostart;
 mod config;
 mod device;
 mod hid;
+mod media;
 mod render;
 mod scenes;
 mod stats;
@@ -15,7 +16,7 @@ use std::process::ExitCode;
 
 use config::Config;
 use device::Atmos;
-use worker::{Hooks, Renderer, Worker};
+use worker::{Hooks, Renderer, Scene, Worker};
 
 const USAGE: &str = "\
 usage: atmos-lcd [command]
@@ -93,8 +94,15 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 renderer.draw(&config)?;
                 std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
             }
-            let canvas = render::rotate(&renderer.draw(&config)?, config.split_rotation().1);
-            std::fs::write(out, render::to_jpeg(&canvas))?;
+            let jpeg = match renderer.draw(&config)? {
+                Scene::Still(canvas) => render::to_jpeg(&render::rotate(&canvas, config.split_rotation().1)),
+                Scene::Animated(anim) => {
+                    let total: std::time::Duration = anim.frames.iter().map(|f| f.delay).sum();
+                    println!("animation: {} frames, {:.1} s per loop", anim.frames.len(), total.as_secs_f32());
+                    anim.frames[0].wire.clone()
+                }
+            };
+            std::fs::write(out, jpeg)?;
         }
         _ => return Err(USAGE.into()),
     }

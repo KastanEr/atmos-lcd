@@ -35,17 +35,19 @@ pub fn to_jpeg(pixmap: &Pixmap) -> Vec<u8> {
 
 /// Loads any image file, center-crops it to a square and scales it to the LCD size.
 pub fn load_image(path: &Path) -> image::ImageResult<Pixmap> {
-    let img = image::open(path)?
-        .resize_to_fill(SIZE, SIZE, image::imageops::FilterType::Lanczos3)
-        .into_rgba8();
+    Ok(fit_to_canvas(image::open(path)?, image::imageops::FilterType::Lanczos3))
+}
+
+/// Center-crops to a square, scales to the LCD size and flattens transparency onto black.
+pub fn fit_to_canvas(img: image::DynamicImage, filter: image::imageops::FilterType) -> Pixmap {
+    let img = img.resize_to_fill(SIZE, SIZE, filter).into_rgba8();
     let mut pixmap = new_canvas(rgb(0, 0, 0));
     for (src, dst) in img.pixels().zip(pixmap.pixels_mut()) {
         let [r, g, b, a] = src.0;
-        // Flatten transparency onto black.
         let s = |c: u8| (c as u16 * a as u16 / 255) as u8;
         *dst = PremultipliedColorU8::from_rgba(s(r), s(g), s(b), 255).expect("opaque");
     }
-    Ok(pixmap)
+    pixmap
 }
 
 /// Rotates the canvas clockwise about its center. Exposed corners take the

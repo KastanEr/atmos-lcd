@@ -21,3 +21,9 @@ lto = true
 
 [build-dependencies]
 slint-build = "1.18.1"
+
+# Slint's software renderer leaves the window blank after restoring from minimized
+# (the full-repaint hint is overwritten by the buffer age). Local fix until upstream
+# ships one; see patches/slint-sw-repaint-after-minimize.diff.
+[patch.crates-io]
+i-slint-backend-winit = { path = "patches/i-slint-backend-winit" }

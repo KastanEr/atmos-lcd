@@ -1,0 +1,57 @@
+--- a/internal/backends/winit/renderer/sw.rs	2026-10-24 15:15:47.330876833 +0900
++++ b/internal/backends/winit/renderer/sw.rs	2026-10-24 15:16:06.632421837 +0900
+@@ -10,7 +10,7 @@
+ use i_slint_core::renderer::DrawOutcome;
+ pub use i_slint_renderer_software::SoftwareRenderer;
+ use i_slint_renderer_software::{PremultipliedRgbaColor, RepaintBufferType, TargetPixel};
+-use std::cell::RefCell;
++use std::cell::{Cell, RefCell};
+ use std::rc::Rc;
+ use std::sync::Arc;
+ use winit::event_loop::ActiveEventLoop;
+@@ -23,6 +23,9 @@
+     surface: RefCell<
+         Option<softbuffer::Surface<Arc<winit::window::Window>, Arc<winit::window::Window>>>,
+     >,
++    /// Set when the platform discarded the window contents (hidden, minimized).
++    /// The next frame must be a full repaint even if softbuffer reports a reused buffer.
++    contents_lost: Cell<bool>,
+ }
+ 
+ #[repr(transparent)]
+@@ -78,6 +81,7 @@
+             renderer: SoftwareRenderer::new(),
+             _context: RefCell::new(None),
+             surface: RefCell::new(None),
++            contents_lost: Cell::new(false),
+         }))
+     }
+ }
+@@ -108,7 +112,13 @@
+             .buffer_mut()
+             .map_err(|e| format!("Error retrieving softbuffer rendering buffer: {e}"))?;
+ 
+-        let age = target_buffer.age();
++        // Frames drawn while still minimized never reach the screen, so keep the flag
++        // until a frame is drawn for a visible window.
++        let contents_lost = self.contents_lost.get();
++        if contents_lost && winit_window.is_minimized() != Some(true) {
++            self.contents_lost.set(false);
++        }
++        let age = if contents_lost { 0 } else { target_buffer.age() };
+         self.renderer.set_repaint_buffer_type(match age {
+             1 => RepaintBufferType::ReusedBuffer,
+             2 => RepaintBufferType::SwappedBuffers,
+@@ -175,8 +185,11 @@
+ 
+     fn occluded(&self, _: bool) {
+         // On X11 and Windows, the buffer is completely cleared when the window is hidden
+-        // and the buffer age doesn't respect that, so clean the partial rendering cache
++        // and the buffer age doesn't respect that, so clean the partial rendering cache.
++        // Setting the repaint buffer type alone is not enough: `render` overwrites it from
++        // the buffer age, so remember it until the next frame is drawn.
+         self.renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
++        self.contents_lost.set(true);
+     }
+ 
+     fn resume(
