@@ -12,7 +12,7 @@ use tiny_skia::Pixmap;
 
 use crate::config::Config;
 use crate::device::{Atmos, KEEPALIVE_INTERVAL};
-use crate::media::{self, Animation};
+use crate::media::{self, Animation, Media};
 use crate::render::{self, TextRenderer};
 use crate::scenes;
 use crate::stats::Stats;
@@ -24,61 +24,30 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
-    Connected,
+    /// Streaming; optionally with a note about the content (e.g. a cut video).
+    Connected(Option<String>),
+    Loading,
     NotFound,
     Error(String),
 }
 
-/// What the selected screen looks like right now.
-pub enum Scene {
-    Still(Pixmap),
-    Animated(Arc<Animation>),
-}
-
-/// Renders screens; keeps fonts, CPU counters and the decoded image between frames.
+/// Draws the generated screens; keeps fonts and CPU counters between frames.
 pub struct Renderer {
     text: TextRenderer,
     stats: Stats,
-    /// Decoded image file, keyed by path and the rotation baked into animations.
-    image: Option<(PathBuf, u16, Arc<Animation>)>,
 }
 
 impl Renderer {
     pub fn new() -> Renderer {
-        Renderer { text: TextRenderer::new(), stats: Stats::new(), image: None }
+        Renderer { text: TextRenderer::new(), stats: Stats::new() }
     }
 
-    /// The screen selected in `config`. Stills are unrotated; animations are pre-rotated.
-    pub fn draw(&mut self, config: &Config) -> Result<Scene, String> {
+    /// The clock or system screen, unrotated.
+    pub fn draw(&mut self, config: &Config) -> Pixmap {
         match config.screen.as_str() {
-            "clock" => Ok(Scene::Still(scenes::clock(&mut self.text))),
-            "image" => {
-                let path = config.image.as_ref().ok_or("no image selected")?;
-                if let Some((p, r, anim)) = &self.image
-                    && p == path
-                    && *r == config.rotation
-                {
-                    return Ok(Scene::Animated(anim.clone()));
-                }
-                match media::load_animation(path, config.split_rotation().1)? {
-                    Some(anim) => {
-                        let anim = Arc::new(anim);
-                        self.image = Some((path.clone(), config.rotation, anim.clone()));
-                        Ok(Scene::Animated(anim))
-                    }
-                    None => {
-                        self.image = None;
-                        render::load_image(path).map(Scene::Still).map_err(|e| format!("{}: {e}", path.display()))
-                    }
-                }
-            }
-            _ => Ok(Scene::Still(scenes::system(&mut self.text, &self.stats.sample()))),
+            "clock" => scenes::clock(&mut self.text),
+            _ => scenes::system(&mut self.text, &self.stats.sample()),
         }
-    }
-
-    /// Whether the screen changes over time and must be redrawn every second.
-    pub fn is_live(config: &Config) -> bool {
-        config.screen != "image"
     }
 }
 
@@ -86,48 +55,65 @@ impl Renderer {
 enum Playing {
     Nothing,
     Still(Vec<u8>),
-    Animation { anim: Arc<Animation>, index: usize },
+    Animation { media: Arc<Media>, index: usize },
 }
 
 impl Playing {
+    fn animation(&self) -> Option<(&Animation, usize)> {
+        match self {
+            Playing::Animation { media, index } => match media.as_ref() {
+                Media::Animated(a) => Some((a, *index)),
+                Media::Still(_) => None,
+            },
+            _ => None,
+        }
+    }
+
     fn current(&self) -> Option<&[u8]> {
         match self {
-            Playing::Nothing => None,
             Playing::Still(f) => Some(f),
-            Playing::Animation { anim, index } => Some(&anim.frames[*index].wire),
+            _ => self.animation().map(|(a, i)| a.frames[i].wire.as_slice()),
         }
     }
 
     /// When the current frame should be sent again or replaced.
     fn interval(&self) -> Duration {
-        match self {
-            Playing::Animation { anim, index } => anim.frames[*index].delay,
-            _ => RESEND_INTERVAL,
-        }
+        self.animation().map_or(RESEND_INTERVAL, |(a, i)| a.frames[i].delay)
     }
 
     fn advance(&mut self) {
-        if let Playing::Animation { anim, index } = self {
-            *index = (*index + 1) % anim.frames.len();
+        let len = self.animation().map(|(a, _)| a.frames.len());
+        if let (Playing::Animation { index, .. }, Some(len)) = (self, len) {
+            *index = (*index + 1) % len;
         }
     }
 }
 
+/// A loaded file depends on its path and on the rotation baked into animation frames.
+type MediaKey = (PathBuf, u16);
+
+enum Msg {
+    Config(Config),
+    Loaded(MediaKey, Result<Media, String>),
+    Quit,
+}
+
 pub struct Worker {
-    tx: Sender<Config>,
+    tx: Sender<Msg>,
     thread: Option<JoinHandle<()>>,
 }
 
 /// Callbacks run on the worker thread.
 pub struct Hooks {
-    /// Each newly drawn still (unrotated), or an animation's first frame, for the preview.
+    /// Each newly shown still (unrotated), or an animation's first frame, for the preview.
     pub frame: Box<dyn Fn(&Pixmap) + Send>,
     pub status: Box<dyn Fn(Status) + Send>,
 }
 
 impl Worker {
     pub fn spawn(config: Config, hooks: Hooks) -> Worker {
-        let (tx, rx) = mpsc::channel::<Config>();
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let loader_tx = tx.clone();
         let thread = thread::spawn(move || {
             let mut config = config;
             let mut renderer = Renderer::new();
@@ -142,7 +128,11 @@ impl Worker {
             let now = Instant::now();
             let (mut next_connect, mut next_keepalive, mut next_draw, mut next_send) = (now, now, now, now);
             let mut playing = Playing::Nothing;
-            let mut draw_error: Option<String> = None;
+            let mut media: Option<(MediaKey, Arc<Media>)> = None;
+            let mut loading: Option<MediaKey> = None;
+            // Problem or note about what is shown, reported instead of a plain "connected".
+            let mut content_error: Option<String> = None;
+            let mut content_note: Option<String> = None;
             // Settings that must be pushed to the device (on change or reconnect).
             let mut dirty = true;
 
@@ -150,39 +140,77 @@ impl Worker {
                 let mut wake = next_draw.min(next_send);
                 wake = if dev.is_some() { wake.min(next_keepalive) } else { wake.min(next_connect) };
                 match rx.recv_timeout(wake.saturating_duration_since(Instant::now())) {
-                    Ok(new) => {
-                        // Coalesce bursts (e.g. dragging the brightness slider).
-                        config = rx.try_iter().last().unwrap_or(new);
+                    Ok(Msg::Config(new)) => {
+                        config = new;
                         dirty = true;
                         next_draw = Instant::now();
                     }
+                    Ok(Msg::Loaded(key, result)) => {
+                        // Ignore results for a file that is no longer selected.
+                        if loading.as_ref() == Some(&key) {
+                            loading = None;
+                            match result {
+                                Ok(m) => media = Some((key, Arc::new(m))),
+                                Err(e) => content_error = Some(e),
+                            }
+                            next_draw = Instant::now();
+                        }
+                    }
+                    Ok(Msg::Quit) | Err(RecvTimeoutError::Disconnected) => break,
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => break,
                 }
                 let now = Instant::now();
 
                 if now >= next_draw {
-                    match renderer.draw(&config) {
-                        Ok(Scene::Still(canvas)) => {
-                            (hooks.frame)(&canvas);
-                            playing = Playing::Still(render::to_jpeg(&render::rotate(&canvas, config.split_rotation().1)));
-                            draw_error = None;
-                        }
-                        Ok(Scene::Animated(anim)) => {
-                            let same = matches!(&playing, Playing::Animation { anim: a, .. } if Arc::ptr_eq(a, &anim));
-                            if !same {
-                                (hooks.frame)(&anim.poster);
-                                playing = Playing::Animation { anim, index: 0 };
+                    // Files don't change by themselves; they wait for the next config or load result.
+                    next_draw = now + Duration::from_secs(3600);
+                    if config.screen != "image" {
+                        let canvas = renderer.draw(&config);
+                        (hooks.frame)(&canvas);
+                        playing = Playing::Still(render::to_jpeg(&render::rotate(&canvas, config.split_rotation().1)));
+                        (content_error, content_note) = (None, None);
+                        next_draw = now + LIVE_REDRAW;
+                        next_send = now;
+                    } else if let Some(path) = &config.image {
+                        let key = (path.clone(), config.rotation);
+                        match &media {
+                            Some((k, m)) if *k == key => {
+                                (content_error, content_note) = (None, None);
+                                match m.as_ref() {
+                                    Media::Still(canvas) => {
+                                        (hooks.frame)(canvas);
+                                        let rotated = render::rotate(canvas, config.split_rotation().1);
+                                        playing = Playing::Still(render::to_jpeg(&rotated));
+                                    }
+                                    Media::Animated(a) => {
+                                        if a.truncated {
+                                            content_note = Some("영상이 길어 앞 1분만 재생".into());
+                                        }
+                                        let same = matches!(&playing, Playing::Animation { media, .. } if Arc::ptr_eq(media, m));
+                                        if !same {
+                                            (hooks.frame)(&a.poster);
+                                            playing = Playing::Animation { media: m.clone(), index: 0 };
+                                        }
+                                    }
+                                }
+                                next_send = now;
                             }
-                            draw_error = None;
+                            _ if loading.as_ref() != Some(&key) => {
+                                // Decoding can take seconds; keep streaming the old content meanwhile.
+                                loading = Some(key.clone());
+                                content_error = None;
+                                let tx = loader_tx.clone();
+                                let rotation = config.split_rotation().1;
+                                thread::spawn(move || {
+                                    let result = media::load(&key.0, rotation);
+                                    let _ = tx.send(Msg::Loaded(key, result));
+                                });
+                            }
+                            _ => {}
                         }
-                        Err(e) => {
-                            set_status(Status::Error(e.clone()));
-                            draw_error = Some(e);
-                        }
+                    } else {
+                        content_error = Some("사진이나 동영상을 선택하세요".into());
                     }
-                    next_draw = if Renderer::is_live(&config) { now + LIVE_REDRAW } else { now + Duration::from_secs(3600) };
-                    next_send = now;
                 }
 
                 if dev.is_none() && now >= next_connect {
@@ -228,7 +256,11 @@ impl Worker {
                     playing.advance();
                 }
                 match result {
-                    Ok(()) => set_status(draw_error.clone().map_or(Status::Connected, Status::Error)),
+                    Ok(()) => set_status(match (&content_error, &loading) {
+                        (Some(e), _) => Status::Error(e.clone()),
+                        (None, Some(_)) => Status::Loading,
+                        (None, None) => Status::Connected(content_note.clone()),
+                    }),
                     Err(e) => {
                         set_status(Status::Error(e.to_string()));
                         dev = None;
@@ -240,15 +272,15 @@ impl Worker {
     }
 
     pub fn apply(&self, config: Config) {
-        let _ = self.tx.send(config);
+        let _ = self.tx.send(Msg::Config(config));
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // Closing the channel ends the loop; the device then falls back to its stored media.
-        let (tx, _) = mpsc::channel();
-        drop(std::mem::replace(&mut self.tx, tx));
+        // The worker holds a sender for its loaders, so the channel never closes on its own.
+        // After it stops, the device falls back to its stored media.
+        let _ = self.tx.send(Msg::Quit);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }

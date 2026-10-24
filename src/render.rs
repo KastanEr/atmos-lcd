@@ -40,7 +40,11 @@ pub fn load_image(path: &Path) -> image::ImageResult<Pixmap> {
 
 /// Center-crops to a square, scales to the LCD size and flattens transparency onto black.
 pub fn fit_to_canvas(img: image::DynamicImage, filter: image::imageops::FilterType) -> Pixmap {
-    let img = img.resize_to_fill(SIZE, SIZE, filter).into_rgba8();
+    // Cropping first means the resize only touches pixels that end up visible.
+    let side = img.width().min(img.height());
+    let (x, y) = ((img.width() - side) / 2, (img.height() - side) / 2);
+    let img = img.crop_imm(x, y, side, side);
+    let img = if side == SIZE { img } else { img.resize_exact(SIZE, SIZE, filter) }.into_rgba8();
     let mut pixmap = new_canvas(rgb(0, 0, 0));
     for (src, dst) in img.pixels().zip(pixmap.pixels_mut()) {
         let [r, g, b, a] = src.0;

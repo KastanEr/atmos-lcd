@@ -1,8 +1,11 @@
-//! Animated images (GIF, animated WebP), pre-encoded for streaming.
+//! Files shown on the LCD: still images, animated GIF/WebP and videos.
+//! Animations are pre-encoded once so playback costs almost nothing.
 
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use image::codecs::gif::GifDecoder;
@@ -11,12 +14,14 @@ use image::imageops::FilterType;
 use image::{AnimationDecoder, DynamicImage, Frames};
 use tiny_skia::Pixmap;
 
-use crate::render;
+use crate::{render, video};
 
 /// MasterCTRL's capability list allows 15 fps; faster frames are merged.
 const MIN_FRAME: Duration = Duration::from_millis(66);
 /// Browsers treat GIF delays of 0-10 ms as "unspecified"; this is their usual substitute.
 const DEFAULT_DELAY: Duration = Duration::from_millis(100);
+/// Longer videos are cut to bound memory (about 0.6 MB per second at 15 fps).
+const MAX_VIDEO: Duration = Duration::from_secs(60);
 
 pub struct Frame {
     /// Rotated JPEG as sent to the device.
@@ -28,6 +33,107 @@ pub struct Animation {
     pub frames: Vec<Frame>,
     /// Unrotated first frame, for the preview.
     pub poster: Pixmap,
+    /// The source was longer than what was kept.
+    pub truncated: bool,
+}
+
+pub enum Media {
+    Still(Pixmap),
+    Animated(Animation),
+}
+
+/// Loads any supported file. Slow for videos; call off the streaming thread.
+pub fn load(path: &Path, extra_rotation: f32) -> Result<Media, String> {
+    if video::is_video(path) {
+        let mut builder = Builder::new(extra_rotation);
+        let truncated = video::decode(path, MIN_FRAME, MAX_VIDEO, |img, delay| builder.push(img, delay))?;
+        return builder
+            .finish(truncated)
+            .map(Media::Animated)
+            .ok_or_else(|| format!("{}: no video frames", path.display()));
+    }
+    if let Some(anim) = load_animation(path, extra_rotation)? {
+        return Ok(Media::Animated(anim));
+    }
+    render::load_image(path).map(Media::Still).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Accumulates frames, merging runs of very short ones. Scaling and JPEG encoding
+/// run on a pool of threads; that dominates load time for videos.
+struct Builder {
+    delays: Vec<Duration>,
+    jobs: Option<mpsc::SyncSender<(usize, DynamicImage)>>,
+    results: mpsc::Receiver<(usize, Vec<u8>, Option<Pixmap>)>,
+    workers: Vec<thread::JoinHandle<()>>,
+}
+
+impl Builder {
+    fn new(extra_rotation: f32) -> Builder {
+        let threads = thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+        // Bounded so a fast decoder cannot queue up hundreds of full-size frames.
+        let (jobs, job_rx) = mpsc::sync_channel::<(usize, DynamicImage)>(threads);
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        let (result_tx, results) = mpsc::channel();
+        let workers = (0..threads)
+            .map(|_| {
+                let job_rx = job_rx.clone();
+                let result_tx = result_tx.clone();
+                thread::spawn(move || {
+                    loop {
+                        let job = job_rx.lock().expect("job queue").recv();
+                        let Ok((index, img)) = job else { break };
+                        // Triangle is much faster than Lanczos and fine for motion.
+                        let canvas = render::fit_to_canvas(img, FilterType::Triangle);
+                        let wire = render::to_jpeg(&render::rotate(&canvas, extra_rotation));
+                        let poster = (index == 0).then_some(canvas);
+                        if result_tx.send((index, wire, poster)).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+        Builder { delays: Vec::new(), jobs: Some(jobs), results, workers }
+    }
+
+    fn push(&mut self, img: DynamicImage, delay: Duration) {
+        // Runs of very short frames would exceed the device's frame rate: drop the
+        // later ones but keep their time, so the loop length stays the same.
+        if delay < MIN_FRAME
+            && let Some(last) = self.delays.last_mut().filter(|d| **d < MIN_FRAME)
+        {
+            *last += delay;
+            return;
+        }
+        let index = self.delays.len();
+        self.delays.push(delay);
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send((index, img));
+        }
+    }
+
+    /// `None` unless there are at least two frames.
+    fn finish(mut self, truncated: bool) -> Option<Animation> {
+        drop(self.jobs.take());
+        for w in self.workers.drain(..) {
+            let _ = w.join();
+        }
+        let mut wires: Vec<Option<Vec<u8>>> = vec![None; self.delays.len()];
+        let mut poster = None;
+        for (index, wire, p) in self.results.try_iter() {
+            wires[index] = Some(wire);
+            poster = poster.or(p);
+        }
+        let frames: Vec<Frame> = wires
+            .into_iter()
+            .zip(&self.delays)
+            .map(|(wire, &delay)| Frame { wire: wire.expect("every frame encoded"), delay })
+            .collect();
+        match (frames.len(), poster) {
+            (n, Some(poster)) if n > 1 => Some(Animation { frames, poster, truncated }),
+            _ => None,
+        }
+    }
 }
 
 /// Decodes an animated GIF/WebP. Returns `Ok(None)` for files that are not animated.
@@ -47,8 +153,7 @@ pub fn load_animation(path: &Path, extra_rotation: f32) -> Result<Option<Animati
         _ => return Ok(None),
     };
 
-    let mut out: Vec<Frame> = Vec::new();
-    let mut poster = None;
+    let mut builder = Builder::new(extra_rotation);
     for frame in frames {
         let frame = frame.map_err(err)?;
         let (num, den) = frame.delay().numer_denom_ms();
@@ -56,24 +161,9 @@ pub fn load_animation(path: &Path, extra_rotation: f32) -> Result<Option<Animati
             d if d <= Duration::from_millis(10) => DEFAULT_DELAY,
             d => d,
         };
-        // Runs of very short frames would exceed the device's frame rate: drop the
-        // later ones but keep their time, so the loop length stays the same.
-        if delay < MIN_FRAME
-            && let Some(last) = out.last_mut().filter(|l| l.delay < MIN_FRAME)
-        {
-            last.delay += delay;
-            continue;
-        }
-        // Triangle is much faster than Lanczos and fine for motion.
-        let canvas = render::fit_to_canvas(DynamicImage::ImageRgba8(frame.into_buffer()), FilterType::Triangle);
-        let wire = render::to_jpeg(&render::rotate(&canvas, extra_rotation));
-        poster.get_or_insert(canvas);
-        out.push(Frame { wire, delay });
+        builder.push(DynamicImage::ImageRgba8(frame.into_buffer()), delay);
     }
-    match (out.len(), poster) {
-        (n, Some(poster)) if n > 1 => Ok(Some(Animation { frames: out, poster })),
-        _ => Ok(None),
-    }
+    Ok(builder.finish(false))
 }
 
 #[cfg(test)]

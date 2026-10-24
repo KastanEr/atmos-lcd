@@ -10,13 +10,15 @@ mod media;
 mod render;
 mod scenes;
 mod stats;
+mod video;
 mod worker;
 
 use std::process::ExitCode;
 
 use config::Config;
 use device::Atmos;
-use worker::{Hooks, Renderer, Scene, Worker};
+use media::Media;
+use worker::{Hooks, Renderer, Worker};
 
 const USAGE: &str = "\
 usage: atmos-lcd [command]
@@ -27,7 +29,7 @@ usage: atmos-lcd [command]
   run <screen>                  show a screen in the foreground until Ctrl+C
   preview <screen> <out.jpg>    render a screen to a file without the device
 screens:
-  clock | system | image <file>";
+  clock | system | image <file>   (image: picture, GIF/WebP or video)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -88,18 +90,23 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "preview" => {
             let (config, rest) = with_screen(&args[1..], Config::load())?;
             let out = rest.first().ok_or(USAGE)?;
-            let mut renderer = Renderer::new();
-            if config.screen == "system" {
-                // CPU load needs two samples to measure an interval.
-                renderer.draw(&config)?;
-                std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-            }
-            let jpeg = match renderer.draw(&config)? {
-                Scene::Still(canvas) => render::to_jpeg(&render::rotate(&canvas, config.split_rotation().1)),
-                Scene::Animated(anim) => {
-                    let total: std::time::Duration = anim.frames.iter().map(|f| f.delay).sum();
-                    println!("animation: {} frames, {:.1} s per loop", anim.frames.len(), total.as_secs_f32());
-                    anim.frames[0].wire.clone()
+            let rotation = config.split_rotation().1;
+            let jpeg = match (config.screen.as_str(), &config.image) {
+                ("image", Some(path)) => match media::load(path, rotation)? {
+                    Media::Still(canvas) => render::to_jpeg(&render::rotate(&canvas, rotation)),
+                    Media::Animated(anim) => {
+                        let total: std::time::Duration = anim.frames.iter().map(|f| f.delay).sum();
+                        let cut = if anim.truncated { " (truncated)" } else { "" };
+                        println!("animation: {} frames, {:.1} s per loop{cut}", anim.frames.len(), total.as_secs_f32());
+                        anim.frames[0].wire.clone()
+                    }
+                },
+                _ => {
+                    let mut renderer = Renderer::new();
+                    // CPU load needs two samples to measure an interval.
+                    renderer.draw(&config);
+                    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+                    render::to_jpeg(&render::rotate(&renderer.draw(&config), rotation))
                 }
             };
             std::fs::write(out, jpeg)?;

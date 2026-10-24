@@ -11,6 +11,7 @@ use tray_icon::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use crate::autostart;
 use crate::config::Config;
 use crate::render::SIZE;
+use crate::video;
 use crate::worker::{Hooks, Status, Worker};
 
 slint::include_modules!();
@@ -147,8 +148,8 @@ fn show_window(w: &AppWindow) {
 
 fn pick_image() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .set_title("LCD에 표시할 사진")
-        .add_filter("이미지", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+        .set_title("LCD에 표시할 사진 / 동영상")
+        .add_filter("사진 / 동영상", &[&["png", "jpg", "jpeg", "gif", "webp", "bmp"][..], &video::EXTENSIONS].concat())
         .pick_file()
 }
 
@@ -175,7 +176,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }),
             status: Box::new(move |status| {
                 let (connected, text) = match status {
-                    Status::Connected => (true, "쿨러 연결됨".to_string()),
+                    Status::Connected(note) => (true, note.unwrap_or_else(|| "쿨러 연결됨".to_string())),
+                    Status::Loading => (true, "불러오는 중…".to_string()),
                     Status::NotFound => (false, "쿨러를 찾는 중…".to_string()),
                     Status::Error(e) => (false, format!("오류: {e}")),
                 };
