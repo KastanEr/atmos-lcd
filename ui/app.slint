@@ -1,10 +1,56 @@
-import { Button, ComboBox, GroupBox, HorizontalBox, Palette, ScrollView, Slider, Switch, VerticalBox } from "std-widgets.slint";
+// Apple-style settings window: grouped white cards on a light grey ground,
+// custom controls drawn here rather than a widget style.
+
+import { ScrollView } from "std-widgets.slint";
+import "fonts/Pretendard-Regular.otf";
+import "fonts/Pretendard-Medium.otf";
+import "fonts/Pretendard-SemiBold.otf";
+import "fonts/Pretendard-Bold.otf";
+
+global Theme {
+    out property <color> ground: #f5f5f7;
+    out property <color> card: #ffffff;
+    out property <color> hairline: #00000014;
+    out property <color> separator: #e5e5ea;
+    out property <color> text: #1d1d1f;
+    out property <color> secondary: #6e6e73;
+    out property <color> accent: #007aff;
+    out property <color> accent-pressed: #0062cc;
+    // Segmented-control and toggle tracks.
+    out property <color> fill: #e9e9ee;
+    out property <color> track: #e3e3e8;
+    out property <color> danger: #ff3b30;
+    // The software renderer draws no drop shadows; raised white controls get
+    // this hairline instead so they stay visible on white.
+    out property <color> raised-edge: #0000002e;
+}
+
+// Soft shadow made of stacked translucent rounded rectangles (no renderer support
+// for drop-shadow). Place it behind the element, same geometry.
+component SoftShadow inherits Rectangle {
+    in property <length> radius;
+    // Mostly below the element and faint, so the steps between layers don't show.
+    for layer in [
+        { spread: 1px, drop: 3px, alpha: 0.05 },
+        { spread: 4px, drop: 7px, alpha: 0.03 },
+        { spread: 8px, drop: 12px, alpha: 0.018 },
+        { spread: 13px, drop: 18px, alpha: 0.01 },
+    ]: Rectangle {
+        x: -layer.spread;
+        y: -layer.spread + layer.drop;
+        width: root.width + 2 * layer.spread;
+        height: root.height + 2 * layer.spread;
+        border-radius: root.radius + layer.spread;
+        background: Colors.black.with-alpha(layer.alpha);
+    }
+}
 
 export struct GalleryTile {
     id: string,
     name: string,
+    // Corners already rounded (transparent) by the app.
     thumb: image,
-    // e.g. "12s" for animations, empty for stills
+    // e.g. "0:12" for animations, empty for stills
     badge: string,
 }
 
@@ -19,128 +65,203 @@ export struct SlotTile {
     progress: float,
 }
 
-// The software renderer clips children to a rectangle, not its rounded corners;
-// this paints the corners with the surrounding color instead. Place it with
-// x/y -6px and the parent's size plus 12px.
-component CornerMask inherits Rectangle {
-    in property <length> radius;
-    in property <brush> outside;
-    border-radius: self.radius + 6px;
-    border-width: 6px;
-    border-color: self.outside;
+component Card inherits Rectangle {
+    background: Theme.card;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.hairline;
 }
 
-// Round button with a glyph, revealed on hover.
-component RoundButton inherits Rectangle {
-    in property <string> glyph;
-    in property <bool> shown;
-    callback clicked();
-    width: 22px;
+component Separator inherits Rectangle {
+    height: 1px;
+    background: Theme.separator;
+}
+
+// macOS-style segmented control: the selected segment floats white on a grey track.
+component Segmented inherits Rectangle {
+    in property <[string]> items;
+    in property <int> current;
+    in property <length> item-height: 28px;
+    in property <length> font-size: 13px;
+    in property <bool> enabled: true;
+    callback activated(int);
+
+    height: self.item-height + 4px;
+    border-radius: 9px;
+    background: Theme.fill;
+    opacity: self.enabled ? 1 : 0.5;
+
+    HorizontalLayout {
+        padding: 2px;
+        for item[i] in root.items: Rectangle {
+            horizontal-stretch: 1;
+            min-width: label.preferred-width + 14px;
+            border-radius: 7px;
+            background: i == root.current ? Theme.card : transparent;
+            border-width: i == root.current ? 1px : 0;
+            border-color: Theme.raised-edge;
+            label := Text {
+                text: item;
+                font-size: root.font-size;
+                font-weight: i == root.current ? 600 : 400;
+                color: Theme.text;
+            }
+            TouchArea {
+                enabled: root.enabled;
+                clicked => { root.activated(i); }
+            }
+        }
+    }
+}
+
+// Thin track with a white knob; reports when the user lets go.
+component AppleSlider inherits Rectangle {
+    in-out property <float> value;
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    callback released();
+
+    height: 22px;
+    property <float> fraction: (root.value - root.minimum) / (root.maximum - root.minimum);
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.track;
+    }
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: (parent.width - 22px) * root.fraction + 11px;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    Rectangle {
+        x: (parent.width - self.width) * root.fraction;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
+        background: white;
+        border-width: 1px;
+        border-color: Theme.raised-edge;
+    }
+    touch := TouchArea {
+        function set-from(x: length) {
+            root.value = Math.round(root.minimum + Math.clamp((x - 11px) / (root.width - 22px), 0, 1) * (root.maximum - root.minimum));
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                self.set-from(self.mouse-x);
+            } else if event.kind == PointerEventKind.up {
+                root.released();
+            }
+        }
+        moved => {
+            if self.pressed {
+                self.set-from(self.mouse-x);
+            }
+        }
+    }
+}
+
+// iOS-style switch.
+component Toggle inherits Rectangle {
+    in property <bool> checked;
+    callback toggled();
+
+    width: 38px;
     height: 22px;
     border-radius: 11px;
-    opacity: self.shown || touch.has-hover ? 1 : 0;
-    background: touch.has-hover ? #e53935 : #000000a0;
-    Text {
-        text: root.glyph;
+    background: root.checked ? Theme.accent : Theme.track;
+    animate background { duration: 150ms; }
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 2px : 2px;
+        y: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: white;
+        border-width: 1px;
+        border-color: Theme.raised-edge;
+        animate x { duration: 150ms; easing: ease-out; }
+    }
+    TouchArea {
+        clicked => { root.toggled(); }
+    }
+}
+
+component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    height: 28px;
+    width: label.preferred-width + 28px;
+    border-radius: 7px;
+    background: touch.pressed ? Theme.accent-pressed : Theme.accent;
+    label := Text {
+        text: root.text;
         color: white;
-        font-size: 15px;
+        font-size: 13px;
+        font-weight: 500;
     }
     touch := TouchArea {
         clicked => { root.clicked(); }
     }
 }
 
-component Slot inherits Rectangle {
-    in property <SlotTile> slot;
-    in property <int> index;
-    // A gallery tile is being dragged over this slot.
-    in property <bool> drop-target;
-    callback clear();
-    // Reports `drop-target` changes so the window knows where a drag ends.
-    callback hover(bool);
+// Colored pill with a dot: connection state.
+component StatusBadge inherits Rectangle {
+    // 0 connected, 1 searching, 2 busy, 3 error
+    in property <int> kind;
+    in property <string> text;
 
-    changed drop-target => { root.hover(self.drop-target); }
-
-    border-radius: 8px;
-    clip: true;
-    background: Palette.control-background;
-
-    area := TouchArea { }
-    if root.slot.filled && root.slot.name != "": Image {
-        width: parent.width;
-        height: parent.height;
-        source: root.slot.thumb;
-        image-fit: cover;
-    }
-    if !root.slot.filled || root.slot.name == "": Text {
-        y: 30px;
-        width: parent.width;
-        height: parent.height - 36px;
-        text: root.slot.filled ? "이전에\n저장됨" : "여기로\n끌어다 놓기";
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        font-size: 12px;
-        color: Palette.foreground.with-alpha(0.55);
-    }
-    Rectangle {
-        x: 6px;
-        y: 6px;
-        width: 20px;
-        height: 20px;
-        border-radius: 10px;
-        background: #000000a0;
-        Text {
-            text: root.index + 1;
-            color: white;
-            font-size: 11px;
-        }
-    }
-    if root.slot.busy: Rectangle {
-        background: #000000b0;
-        Text {
-            y: parent.height / 2 - 18px;
-            width: parent.width;
-            text: root.slot.phase + "\n" + Math.round(root.slot.progress * 100) + "%";
-            horizontal-alignment: center;
-            color: white;
-            font-size: 12px;
-        }
-        // Progress bar along the bottom edge.
-        Rectangle {
-            x: 10px;
-            y: parent.height - 16px;
-            width: parent.width - 20px;
-            height: 4px;
-            border-radius: 2px;
-            background: #ffffff40;
+    property <color> ink: root.kind == 0 ? #1f8f3a : root.kind == 2 ? #0062cc : root.kind == 3 ? #c4271d : #6e6e73;
+    height: 22px;
+    width: row.preferred-width;
+    border-radius: 11px;
+    background: root.kind == 0 ? #e3f6e8 : root.kind == 2 ? #e3effd : root.kind == 3 ? #fde8e7 : #ececf0;
+    row := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+        VerticalLayout {
+            alignment: center;
             Rectangle {
-                x: 0;
-                width: parent.width * root.slot.progress;
-                height: parent.height;
-                border-radius: 2px;
-                background: Palette.accent-background;
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.kind == 0 ? #34c759 : root.ink;
             }
         }
+        Text {
+            text: root.text;
+            color: root.ink;
+            font-size: 12px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
     }
-    CornerMask {
-        x: -6px;
-        y: -6px;
-        width: parent.width + 12px;
-        height: parent.height + 12px;
-        radius: parent.border-radius;
-        outside: Palette.background;
+}
+
+// Small round "×" shown on hover.
+component RemoveButton inherits Rectangle {
+    in property <bool> shown;
+    callback clicked();
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    opacity: self.shown || touch.has-hover ? 1 : 0;
+    background: touch.has-hover ? Theme.danger : #00000080;
+    Text {
+        text: "×";
+        color: white;
+        font-size: 15px;
     }
-    Rectangle {
-        border-radius: parent.border-radius;
-        border-width: root.drop-target ? 3px : 1px;
-        border-color: root.drop-target ? Palette.accent-background : Palette.border;
-    }
-    if root.slot.filled && !root.slot.busy: RoundButton {
-        x: parent.width - 28px;
-        y: 6px;
-        glyph: "×";
-        shown: area.has-hover;
-        clicked => { root.clear(); }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
     }
 }
 
@@ -156,11 +277,7 @@ component Tile inherits Rectangle {
     callback drag-move(length, length);
     callback drag-end();
 
-    property <length> name-height: 26px;
     property <bool> dragging;
-    border-radius: 8px;
-    clip: true;
-    background: Palette.control-background;
 
     area := TouchArea {
         clicked => {
@@ -188,70 +305,158 @@ component Tile inherits Rectangle {
             }
         }
     }
+    // Selection ring with a white gap, like Photos.
+    if root.selected: Rectangle {
+        x: -5px;
+        y: -5px;
+        width: root.width + 10px;
+        height: root.width + 10px;
+        border-radius: 15px;
+        border-width: 2.5px;
+        border-color: Theme.accent;
+    }
     Image {
         x: 0;
         y: 0;
-        width: parent.width;
-        height: parent.height - root.name-height;
+        width: root.width;
+        height: root.width;
         source: root.tile.thumb;
         image-fit: cover;
     }
     if root.tile.badge != "": Rectangle {
-        x: 6px;
-        y: 6px;
-        width: badge-text.preferred-width + 10px;
-        height: 20px;
-        border-radius: 4px;
-        background: #000000a0;
-        badge-text := Text {
-            text: "▶ " + root.tile.badge;
+        x: root.width - self.width - 6px;
+        y: root.width - self.height - 6px;
+        width: badge.preferred-width + 12px;
+        height: 18px;
+        border-radius: 9px;
+        background: #00000073;
+        badge := Text {
+            text: root.tile.badge;
             color: white;
-            font-size: 11px;
+            font-size: 10px;
+            font-weight: 600;
         }
     }
     Text {
-        x: 8px;
-        y: parent.height - root.name-height;
-        width: parent.width - 16px;
-        height: root.name-height;
+        x: 0;
+        y: root.width + 6px;
+        width: root.width;
         text: root.tile.name;
         font-size: 12px;
+        font-weight: root.selected ? 600 : 400;
+        color: root.selected ? Theme.accent : Theme.text;
+        horizontal-alignment: center;
         overflow: elide;
-        vertical-alignment: center;
     }
-    CornerMask {
-        x: -6px;
-        y: -6px;
-        width: parent.width + 12px;
-        height: parent.height + 12px;
-        radius: parent.border-radius;
-        outside: Palette.alternate-background;
+    RemoveButton {
+        x: root.width - self.width - 6px;
+        y: 6px;
+        shown: area.has-hover;
+        clicked => { root.delete(); }
+    }
+}
+
+component Slot inherits Rectangle {
+    in property <SlotTile> slot;
+    in property <int> index;
+    // A gallery tile is being dragged over this slot.
+    in property <bool> drop-target;
+    callback clear();
+    // Reports `drop-target` changes so the window knows where a drag ends.
+    callback hover(bool);
+
+    changed drop-target => { root.hover(self.drop-target); }
+
+    border-radius: 10px;
+    background: #f2f2f7;
+
+    area := TouchArea { }
+    if root.slot.filled && root.slot.name != "": Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.slot.thumb;
+        image-fit: cover;
+    }
+    if !root.slot.filled || root.slot.name == "": Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.slot.filled ? "이전에\n저장됨" : "여기로\n끌어다 놓기";
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: 11px;
+        color: Theme.secondary;
+    }
+    Rectangle {
+        x: 6px;
+        y: 6px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #00000073;
+        Text {
+            text: root.index + 1;
+            color: white;
+            font-size: 10px;
+            font-weight: 600;
+        }
+    }
+    if root.slot.busy: Rectangle {
+        border-radius: parent.border-radius;
+        background: #000000a6;
+        Text {
+            y: parent.height / 2 - 18px;
+            width: parent.width;
+            text: root.slot.phase + "\n" + Math.round(root.slot.progress * 100) + "%";
+            horizontal-alignment: center;
+            color: white;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        Rectangle {
+            x: 10px;
+            y: parent.height - 14px;
+            width: parent.width - 20px;
+            height: 4px;
+            border-radius: 2px;
+            background: #ffffff40;
+            Rectangle {
+                x: 0;
+                width: parent.width * root.slot.progress;
+                height: parent.height;
+                border-radius: 2px;
+                background: white;
+            }
+        }
     }
     Rectangle {
         border-radius: parent.border-radius;
-        border-width: root.selected ? 3px : 1px;
-        border-color: root.selected ? Palette.accent-background : Palette.border;
+        border-width: root.drop-target ? 2.5px : 0;
+        border-color: Theme.accent;
     }
-    RoundButton {
-        x: parent.width - 28px;
+    if root.slot.filled && !root.slot.busy: RemoveButton {
+        x: parent.width - self.width - 6px;
         y: 6px;
-        glyph: "×";
         shown: area.has-hover;
-        clicked => { root.delete(); }
+        clicked => { root.clear(); }
     }
 }
 
 export component AppWindow inherits Window {
     title: "Atmos LCD";
     icon: @image-url("icon.png");
-    default-font-family: "Malgun Gothic";
+    default-font-family: "Pretendard";
+    background: Theme.ground;
     preferred-width: 880px;
     preferred-height: 640px;
     min-width: 760px;
 
+    // Corners already rounded (transparent) by the app.
     in property <image> preview;
-    in property <string> status;
-    in property <bool> connected;
+    // 0 connected, 1 searching, 2 busy, 3 error
+    in property <int> status-kind: 1;
+    in property <string> status: "찾는 중";
+    // Short message from the app (a failure, a hint); empty when there is none.
+    in property <string> notice;
     // 0 = system, 1 = clock, 2 = gallery
     in-out property <int> screen-index;
     in-out property <float> brightness;
@@ -282,93 +487,140 @@ export component AppWindow inherits Window {
     callback drop-item(string, int);
     callback clear-slot(int);
 
-    HorizontalBox {
-        // Left: what the cooler shows and how.
-        VerticalBox {
+    HorizontalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-top: 22px;
+        padding-bottom: 22px;
+        spacing: 22px;
+
+        // Left: the cooler and how it shows things.
+        VerticalLayout {
+            width: 300px;
+            spacing: 18px;
             alignment: start;
-            width: 320px;
-            Rectangle {
-                height: 260px;
-                Rectangle {
-                    width: 240px;
-                    height: 240px;
-                    border-radius: 12px;
-                    clip: true;
-                    background: #0a0c14;
-                    Image {
-                        width: parent.width;
-                        height: parent.height;
-                        source: root.preview;
-                        // Show the screen as it appears on the cooler.
-                        transform-rotation: root.rotation-index * 60deg;
+
+            VerticalLayout {
+                spacing: 14px;
+                padding-top: 6px;
+                HorizontalLayout {
+                    alignment: center;
+                    padding-bottom: 10px;
+                    Rectangle {
+                        width: 208px;
+                        height: 208px;
+                        SoftShadow {
+                            width: parent.width;
+                            height: parent.height;
+                            radius: 22px;
+                        }
+                        Rectangle {
+                            border-radius: 22px;
+                            background: #0a0c14;
+                        }
+                        Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: root.preview;
+                            // Show the screen as it appears on the cooler.
+                            transform-rotation: root.rotation-index * 60deg;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    HorizontalLayout {
+                        alignment: center;
+                        StatusBadge {
+                            kind: root.status-kind;
+                            text: root.offline && root.status-kind == 0 ? "오프라인 모드" : root.status;
+                        }
+                    }
+                    if root.notice != "": Text {
+                        text: root.notice;
+                        font-size: 12px;
+                        color: Theme.secondary;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
                     }
                 }
             }
 
-            HorizontalBox {
-                alignment: center;
-                Rectangle {
-                    width: 10px;
-                    height: 10px;
-                    border-radius: 5px;
-                    background: root.connected ? #4caf50 : #e57373;
-                }
-                Text {
-                    text: root.status;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    max-width: 280px;
-                }
-            }
-
-            GroupBox {
-                title: "화면";
-                if !root.offline: ComboBox {
-                    model: ["시스템 (CPU / GPU)", "시계", "갤러리"];
-                    current-index <=> root.screen-index;
-                    selected => { root.settings-changed(); }
-                }
-                if root.offline: ComboBox {
-                    model: ["갤러리"];
-                    current-index: 0;
-                    enabled: false;
-                }
-            }
-
-            GroupBox {
-                title: "디스플레이";
-                VerticalBox {
-                    HorizontalBox {
-                        padding: 0;
+            Card {
+                VerticalLayout {
+                    VerticalLayout {
+                        padding: 14px;
+                        padding-top: 12px;
+                        spacing: 9px;
+                        Text {
+                            text: "화면";
+                            font-size: 13px;
+                            font-weight: 500;
+                            color: Theme.text;
+                        }
+                        Segmented {
+                            items: ["시스템", "시계", "갤러리"];
+                            current: root.offline ? 2 : root.screen-index;
+                            enabled: !root.offline;
+                            activated(i) => {
+                                root.screen-index = i;
+                                root.settings-changed();
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        Separator { }
+                    }
+                    HorizontalLayout {
+                        padding: 14px;
+                        padding-top: 11px;
+                        padding-bottom: 11px;
+                        spacing: 12px;
                         Text {
                             text: "밝기";
-                            min-width: 50px;
+                            width: 32px;
+                            font-size: 13px;
+                            color: Theme.text;
                             vertical-alignment: center;
                         }
-                        Slider {
-                            minimum: 0;
-                            maximum: 100;
+                        AppleSlider {
                             value <=> root.brightness;
                             released => { root.settings-changed(); }
                         }
                         Text {
                             text: Math.round(root.brightness) + "%";
-                            min-width: 40px;
+                            width: 36px;
+                            font-size: 13px;
+                            color: Theme.secondary;
                             horizontal-alignment: right;
                             vertical-alignment: center;
                         }
                     }
-                    HorizontalBox {
-                        padding: 0;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        Separator { }
+                    }
+                    HorizontalLayout {
+                        padding: 14px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 10px;
                         Text {
                             text: "회전";
-                            min-width: 50px;
+                            font-size: 13px;
+                            color: Theme.text;
                             vertical-alignment: center;
                         }
-                        ComboBox {
-                            model: ["0°", "60°", "120°", "180°", "240°", "300°"];
-                            current-index <=> root.rotation-index;
-                            selected => { root.settings-changed(); }
+                        Segmented {
+                            items: ["0°", "60°", "120°", "180°", "240°", "300°"];
+                            current: root.rotation-index;
+                            item-height: 24px;
+                            font-size: 12px;
+                            activated(i) => {
+                                root.rotation-index = i;
+                                root.settings-changed();
+                            }
                         }
                     }
                 }
@@ -376,135 +628,148 @@ export component AppWindow inherits Window {
         }
 
         // Right: registered media, and in offline mode the cooler's storage.
-        VerticalBox {
-            padding: 0;
-            HorizontalBox {
-                padding: 0;
-                alignment: end;
-                Switch {
+        VerticalLayout {
+            spacing: 12px;
+
+            HorizontalLayout {
+                height: 36px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "갤러리";
+                        font-size: 22px;
+                        font-weight: 700;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.import-status != "" ? root.import-status : root.gallery-summary;
+                        font-size: 13px;
+                        color: Theme.secondary;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                Text {
                     text: "오프라인 모드";
-                    checked: root.offline;
-                    toggled => { root.toggle-offline(); }
+                    font-size: 13px;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        checked: root.offline;
+                        toggled => { root.toggle-offline(); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    PrimaryButton {
+                        text: "추가";
+                        clicked => { root.add-items(); }
+                    }
                 }
             }
 
-            GroupBox {
-                title: "갤러리";
+            Card {
                 vertical-stretch: 1;
-                VerticalBox {
-                    padding: 0;
-                    HorizontalBox {
-                        padding: 0;
-                        Text {
-                            text: root.import-status != "" ? root.import-status
-                                : root.offline && root.tiles.length > 0 ? root.gallery-summary + " · 슬롯으로 끌어다 놓으면 쿨러에 저장"
-                                : root.gallery-summary;
-                            overflow: elide;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        Button {
-                            text: "추가…";
-                            clicked => { root.add-items(); }
-                        }
-                    }
-                    // Panel behind the grid so the tiles don't float on the window.
-                    Rectangle {
+                VerticalLayout {
+                    padding: 16px;
+                    if root.tiles.length > 0: ScrollView {
+                        property <length> tile-w: 110px;
+                        // Thumbnail, name below, and room for the selection ring.
+                        property <length> tile-h: self.tile-w + 26px;
+                        property <length> gap: 14px;
+                        // As many columns as fit the current width.
+                        property <int> columns: Math.max(1, Math.floor((self.visible-width - 10px + self.gap) / (self.tile-w + self.gap)));
                         vertical-stretch: 1;
-                        border-radius: 10px;
-                        background: Palette.alternate-background;
-                        VerticalLayout {
-                            padding: 12px;
-                            if root.tiles.length > 0: ScrollView {
-                                property <length> tile-w: 140px;
-                                property <length> tile-h: 166px;
-                                property <length> gap: 12px;
-                                // As many columns as fit the current width.
-                                property <int> columns: Math.max(1, Math.floor((self.visible-width + gap) / (tile-w + gap)));
-                                vertical-stretch: 1;
-                                content-height: Math.ceil(root.tiles.length / columns) * (tile-h + gap);
-                                for tile[i] in root.tiles: Tile {
-                                    x: Math.mod(i, columns) * (tile-w + gap);
-                                    y: Math.floor(i / columns) * (tile-h + gap);
-                                    width: tile-w;
-                                    height: tile-h;
-                                    tile: tile;
-                                    draggable: root.offline;
-                                    selected: tile.id == root.selected-id && (root.screen-index == 2 || root.offline);
-                                    clicked => { root.select-item(tile.id); }
-                                    delete => { root.delete-item(tile.id); }
-                                    drag-start => {
-                                        root.drag-tile = tile;
-                                        root.dragging = true;
-                                    }
-                                    drag-move(x, y) => {
-                                        root.drag-x = x;
-                                        root.drag-y = y;
-                                    }
-                                    drag-end => {
-                                        // Read the target before `dragging` clears the slots' hover state.
-                                        if root.hovered-slot >= 0 {
-                                            root.drop-item(tile.id, root.hovered-slot);
-                                        }
-                                        root.dragging = false;
-                                        root.hovered-slot = -1;
-                                    }
-                                }
+                        content-height: Math.ceil(root.tiles.length / self.columns) * (self.tile-h + self.gap) + 10px;
+                        for tile[i] in root.tiles: Tile {
+                            x: 5px + Math.mod(i, parent.columns) * (parent.tile-w + parent.gap);
+                            y: 5px + Math.floor(i / parent.columns) * (parent.tile-h + parent.gap);
+                            width: parent.tile-w;
+                            height: parent.tile-h;
+                            tile: tile;
+                            draggable: root.offline;
+                            selected: tile.id == root.selected-id && (root.screen-index == 2 || root.offline);
+                            clicked => { root.select-item(tile.id); }
+                            delete => { root.delete-item(tile.id); }
+                            drag-start => {
+                                root.drag-tile = tile;
+                                root.dragging = true;
                             }
-                            if root.tiles.length == 0: Text {
-                                vertical-stretch: 1;
-                                text: "\"추가…\"로 사진, GIF, 동영상을 등록하세요";
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                color: Palette.foreground.with-alpha(0.6);
+                            drag-move(x, y) => {
+                                root.drag-x = x;
+                                root.drag-y = y;
+                            }
+                            drag-end => {
+                                // Read the target before `dragging` clears the slots' hover state.
+                                if root.hovered-slot >= 0 {
+                                    root.drop-item(tile.id, root.hovered-slot);
+                                }
+                                root.dragging = false;
+                                root.hovered-slot = -1;
                             }
                         }
                     }
+                    if root.tiles.length == 0: Text {
+                        vertical-stretch: 1;
+                        text: "\"추가\"로 사진, GIF, 동영상을 등록하세요";
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        color: Theme.secondary;
+                    }
+                }
+            }
 
-                    // Takes only the height it needs; the gallery panel gets the rest.
-                    if root.offline: VerticalLayout {
-                        vertical-stretch: 0;
+            // Takes only the height it needs; the gallery card gets the rest.
+            if root.offline: Card {
+                vertical-stretch: 0;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+                    HorizontalLayout {
                         spacing: 8px;
-                        padding-top: 8px;
-                        HorizontalLayout {
-                            vertical-stretch: 0;
-                            alignment: start;
-                            spacing: 10px;
-                            Text {
-                                text: "쿨러 저장공간";
-                                font-weight: 700;
-                            }
-                            Text {
-                                text: "저장된 항목을 번갈아 재생해요";
-                                color: Palette.foreground.with-alpha(0.6);
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
+                        alignment: start;
+                        Text {
+                            text: "쿨러 저장공간";
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: Theme.text;
                         }
-                        HorizontalLayout {
-                            vertical-stretch: 0;
-                            spacing: 10px;
-                            for slot[i] in root.slots: Slot {
-                                // Share the width; square, but never larger than a gallery tile.
-                                horizontal-stretch: 1;
-                                min-width: 64px;
-                                max-width: 140px;
-                                height: self.width;
-                                slot: slot;
-                                index: i;
-                                drop-target: root.dragging
-                                    && root.drag-x >= self.absolute-position.x && root.drag-x < self.absolute-position.x + self.width
-                                    && root.drag-y >= self.absolute-position.y && root.drag-y < self.absolute-position.y + self.height;
-                                hover(on) => {
-                                    if on {
-                                        root.hovered-slot = i;
-                                    } else if root.hovered-slot == i {
-                                        root.hovered-slot = -1;
-                                    }
+                        Text {
+                            text: "PC 연결이 없을 때 번갈아 재생해요 · 갤러리에서 끌어다 놓기";
+                            font-size: 12px;
+                            color: Theme.secondary;
+                            overflow: elide;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        for slot[i] in root.slots: Slot {
+                            // Share the width; square.
+                            horizontal-stretch: 1;
+                            min-width: 64px;
+                            max-width: 120px;
+                            height: self.width;
+                            slot: slot;
+                            index: i;
+                            drop-target: root.dragging
+                                && root.drag-x >= self.absolute-position.x && root.drag-x < self.absolute-position.x + self.width
+                                && root.drag-y >= self.absolute-position.y && root.drag-y < self.absolute-position.y + self.height;
+                            hover(on) => {
+                                if on {
+                                    root.hovered-slot = i;
+                                } else if root.hovered-slot == i {
+                                    root.hovered-slot = -1;
                                 }
-                                clear => { root.clear-slot(i); }
                             }
+                            clear => { root.clear-slot(i); }
                         }
                     }
                 }
@@ -518,9 +783,8 @@ export component AppWindow inherits Window {
         y: root.drag-y - 40px;
         width: 80px;
         height: 80px;
-        border-radius: 8px;
-        clip: true;
-        opacity: 0.8;
+        opacity: 0.85;
+        border-radius: 10px;
         Image {
             width: parent.width;
             height: parent.height;

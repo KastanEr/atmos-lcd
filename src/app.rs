@@ -130,6 +130,8 @@ struct App {
     device_slots: Vec<bool>,
     /// Slots being exported or uploaded, with the gallery item going in.
     storing: Vec<Option<Storing>>,
+    /// Clears `notice` after a while.
+    notice_timer: slint::Timer,
 }
 
 /// A gallery item on its way into a storage slot.
@@ -145,12 +147,23 @@ impl App {
     /// Saves, pushes to the worker and refreshes both UIs.
     fn apply(&mut self, config: Config) {
         if let Err(e) = config.save() {
-            self.window.set_status(format!("설정 저장 실패: {e}").into());
+            self.notify(format!("설정 저장 실패: {e}"));
         }
         self.worker.apply(config.clone());
         self.tray.sync(&config);
         load_into_window(&self.window, &config);
         self.config = config;
+    }
+
+    /// Shows a short message under the status badge for a few seconds.
+    fn notify(&self, text: impl Into<String>) {
+        self.window.set_notice(text.into().into());
+        let weak = self.window.as_weak();
+        self.notice_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_secs(6), move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_notice("".into());
+            }
+        });
     }
 
     /// Reloads the gallery grid from disk; forgets the selected item if it is gone.
@@ -169,7 +182,12 @@ impl App {
                 id: item.id.as_str().into(),
                 name: item.name.as_str().into(),
                 thumb: load_thumb(&item.id),
-                badge: if item.is_animated() { format!("{:.0}s", item.duration.as_secs_f32()).into() } else { "".into() },
+                badge: if item.is_animated() {
+                    let secs = item.duration.as_secs_f32().round() as u64;
+                    format!("{}:{:02}", secs / 60, secs % 60).into()
+                } else {
+                    "".into()
+                },
             })
             .collect();
         let summary = if items.is_empty() { String::new() } else { format!("{}개 · {:.0} MB", items.len(), bytes as f32 / 1e6) };
@@ -189,7 +207,7 @@ impl App {
                 self.apply(c);
             }
             Ok(_) => {}
-            Err(e) => self.window.set_status(format!("{name}: 변환 실패 ({e})").into()),
+            Err(e) => self.notify(format!("{name}: 변환 실패 ({e})")),
         }
     }
 
@@ -217,7 +235,7 @@ impl App {
             }
             with_app(move |app| {
                 if let Err(e) = result {
-                    app.window.set_status(format!("삭제 실패: {e}").into());
+                    app.notify(format!("삭제 실패: {e}"));
                 }
                 app.refresh_gallery();
             });
@@ -302,13 +320,13 @@ impl App {
                     let _ = std::fs::remove_dir_all(gallery::export_dir().join(&id));
                     // The slot's thumbnail shows the result; only failures need words.
                     if let Err(e) = slots::record(slot, &id, &name) {
-                        self.window.set_status(format!("슬롯 기록 실패: {e}").into());
+                        self.notify(format!("슬롯 기록 실패: {e}"));
                     }
                 }
             }
             StorageEvent::Failed(slot, e) => {
                 self.storing[slot] = None;
-                self.window.set_status(format!("슬롯 {} 저장 실패: {e}", slot + 1).into());
+                self.notify(format!("슬롯 {} 저장 실패: {e}", slot + 1));
             }
         }
         self.refresh_slots();
@@ -317,7 +335,7 @@ impl App {
     /// Updates the registry and the tray check mark.
     fn set_autostart(&self, enabled: bool) {
         if let Err(e) = autostart::set_enabled(enabled) {
-            self.window.set_status(format!("자동 실행 설정 실패: {e}").into());
+            self.notify(format!("자동 실행 설정 실패: {e}"));
         }
         let actual = autostart::is_enabled();
         self.tray.autostart.set_checked(actual);
@@ -339,7 +357,7 @@ impl App {
             if c.screen == "gallery" && c.item.is_none() {
                 self.tray.sync(&self.config);
                 self.window.set_screen_index(i as i32);
-                self.window.set_status("갤러리에서 항목을 선택하세요".into());
+                self.notify("갤러리에서 항목을 선택하세요");
                 show_window(&self.window);
                 return;
             }
@@ -371,6 +389,11 @@ fn load_into_window(w: &AppWindow, c: &Config) {
     w.set_offline(c.offline);
 }
 
+/// Corner radii in source pixels, matching the UI's rounded rectangles at their
+/// displayed sizes (preview: 22 px at 208 px of 480; thumbnails: 10 px at 110 px of 160).
+const PREVIEW_RADIUS: f32 = 51.0;
+const THUMB_RADIUS: f32 = 15.0;
+
 fn load_thumb(id: &str) -> Image {
     load_image(&gallery::thumb_path(id))
 }
@@ -378,7 +401,30 @@ fn load_thumb(id: &str) -> Image {
 fn load_image(path: &std::path::Path) -> Image {
     let Ok(img) = image::open(path) else { return Image::default() };
     let img = img.into_rgba8();
-    Image::from_rgba8(SharedPixelBuffer::clone_from_slice(img.as_raw(), img.width(), img.height()))
+    Image::from_rgba8(rounded(img.as_raw(), img.width(), img.height(), THUMB_RADIUS))
+}
+
+/// Copies straight RGBA pixels with the corners outside `radius` made transparent
+/// (antialiased). The software renderer cannot clip images to rounded corners.
+fn rounded(rgba: &[u8], width: u32, height: u32, radius: f32) -> SharedPixelBuffer<Rgba8Pixel> {
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba, width, height);
+    let (w, h) = (width as f32, height as f32);
+    let pixels = buffer.make_mut_slice();
+    for y in 0..height {
+        for x in 0..width {
+            // Distance from the pixel center to the nearest corner circle's center.
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let dx = (radius - px).max(px - (w - radius)).max(0.0);
+            let dy = (radius - py).max(py - (h - radius)).max(0.0);
+            if dx == 0.0 || dy == 0.0 {
+                continue;
+            }
+            let coverage = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            let p = &mut pixels[(y * width + x) as usize];
+            p.a = (p.a as f32 * coverage) as u8;
+        }
+    }
+    buffer
 }
 
 /// Named event a second launch sets to bring up the settings window.
@@ -446,21 +492,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let status_window = window.as_weak();
         Hooks {
             frame: Box::new(move |pixmap| {
-                let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixmap.data(), SIZE, SIZE);
+                let buffer = rounded(pixmap.data(), SIZE, SIZE, PREVIEW_RADIUS);
                 // Always store it: static screens (images) are drawn only once, possibly
                 // while the window is hidden. A hidden window does not repaint, so this is cheap.
                 let _ = frame_window.upgrade_in_event_loop(move |w| w.set_preview(Image::from_rgba8(buffer)));
             }),
             status: Box::new(move |status| {
-                let (connected, text) = match status {
-                    Status::Connected => (true, "쿨러 연결됨".to_string()),
-                    Status::Loading => (true, "불러오는 중…".to_string()),
-                    Status::NotFound => (false, "쿨러를 찾는 중…".to_string()),
-                    Status::Error(e) => (false, format!("오류: {e}")),
+                // Badge kinds: 0 connected, 1 searching, 2 busy, 3 error (see StatusBadge).
+                let (kind, text, detail) = match status {
+                    Status::Connected => (0, "연결됨", String::new()),
+                    Status::Loading => (2, "불러오는 중", String::new()),
+                    Status::NotFound => (1, "쿨러를 찾는 중", String::new()),
+                    Status::Error(e) => (3, "오류", e),
                 };
                 let _ = status_window.upgrade_in_event_loop(move |w| {
-                    w.set_connected(connected);
+                    w.set_status_kind(kind);
                     w.set_status(text.into());
+                    w.set_notice(detail.into());
                 });
             }),
             storage: Box::new(|event| with_app(move |app| app.storage_event(event))),
@@ -484,6 +532,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         importer: Importer::spawn(),
         device_slots: vec![false; slots::COUNT],
         storing: (0..slots::COUNT).map(|_| None).collect(),
+        notice_timer: slint::Timer::default(),
     }));
     app.borrow().refresh_slots();
     app.borrow_mut().refresh_gallery();
