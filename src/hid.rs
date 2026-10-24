@@ -14,14 +14,18 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiGetDeviceInterfaceDetailW,
 };
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{HidD_GetHidGuid, HidD_SetOutputReport};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
+    CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
 };
-use windows_sys::Win32::System::IO::CancelIoEx;
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::Threading::CreateEventW;
 use windows_sys::core::GUID;
 
 const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
+/// Writes kept in flight by `write_all`. Measured on the Atmos II: 1 in flight
+/// gives 16.1 ms per 54 KB frame, 2 or more about 8.8 ms (the device's limit).
+const QUEUE_DEPTH: usize = 4;
 
 /// Returns the device interface paths of all present HID devices.
 pub fn device_paths() -> Vec<String> {
@@ -64,7 +68,7 @@ unsafe impl Send for Handle {}
 unsafe impl Sync for Handle {}
 
 impl Handle {
-    fn open(path: &str) -> io::Result<Handle> {
+    fn open(path: &str, flags: u32) -> io::Result<Handle> {
         let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
         let h = unsafe {
             CreateFileW(
@@ -73,7 +77,7 @@ impl Handle {
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 null(),
                 OPEN_EXISTING,
-                0,
+                flags,
                 null_mut(),
             )
         };
@@ -102,8 +106,9 @@ pub struct HidDevice {
 impl HidDevice {
     /// Opens `path`; input reports of `report_len` bytes arrive on the returned receiver.
     pub fn open(path: &str, report_len: usize) -> io::Result<(HidDevice, Receiver<Vec<u8>>)> {
-        let writer = Handle::open(path)?;
-        let reader = std::sync::Arc::new(Handle::open(path)?);
+        // Overlapped so several reports can be queued at once (see `write_all`).
+        let writer = Handle::open(path, FILE_FLAG_OVERLAPPED)?;
+        let reader = std::sync::Arc::new(Handle::open(path, 0)?);
         let (tx, rx) = mpsc::channel();
         let thread_reader = reader.clone();
         thread::spawn(move || {
@@ -123,10 +128,58 @@ impl HidDevice {
 
     /// Writes one report over the interrupt OUT pipe; `report[0]` is the report ID.
     pub fn write(&self, report: &[u8]) -> io::Result<()> {
-        debug_assert_eq!(report.len(), self.report_len);
+        self.write_all(report)
+    }
+
+    /// Writes consecutive reports (`data.len()` a multiple of the report length),
+    /// keeping up to `QUEUE_DEPTH` writes in flight. Waiting for each write before
+    /// issuing the next leaves the pipe idle between reports and roughly halves throughput.
+    pub fn write_all(&self, data: &[u8]) -> io::Result<()> {
+        debug_assert_eq!(data.len() % self.report_len, 0);
+        let events = (0..QUEUE_DEPTH)
+            .map(|_| {
+                let h = unsafe { CreateEventW(null(), 1, 0, null()) };
+                if h.is_null() { Err(io::Error::last_os_error()) } else { Ok(Handle(h)) }
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        // Fixed allocation: the kernel holds pointers to these until each write completes.
+        let mut slots: Vec<OVERLAPPED> = vec![unsafe { std::mem::zeroed() }; QUEUE_DEPTH];
+        let mut in_flight = std::collections::VecDeque::with_capacity(QUEUE_DEPTH);
+        let mut result = Ok(());
+
+        for (i, report) in data.chunks(self.report_len).enumerate() {
+            let slot = i % QUEUE_DEPTH;
+            if in_flight.len() == QUEUE_DEPTH {
+                let done = in_flight.pop_front().expect("queue is full");
+                result = self.finish(&slots[done]);
+                if result.is_err() {
+                    break;
+                }
+            }
+            slots[slot] = unsafe { std::mem::zeroed() };
+            slots[slot].hEvent = events[slot].0;
+            let ok = unsafe {
+                WriteFile(self.writer.0, report.as_ptr(), report.len() as u32, null_mut(), &mut slots[slot])
+            };
+            if ok == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
+                result = Err(io::Error::last_os_error());
+                break;
+            }
+            in_flight.push_back(slot);
+        }
+        // Always drain: the pending writes still reference `data` and `slots`.
+        for slot in in_flight {
+            let r = self.finish(&slots[slot]);
+            if result.is_ok() {
+                result = r;
+            }
+        }
+        result
+    }
+
+    fn finish(&self, ov: &OVERLAPPED) -> io::Result<()> {
         let mut n = 0u32;
-        let ok = unsafe { WriteFile(self.writer.0, report.as_ptr(), report.len() as u32, &mut n, null_mut()) };
-        if ok == 0 {
+        if unsafe { GetOverlappedResult(self.writer.0, ov, &mut n, 1) } == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())

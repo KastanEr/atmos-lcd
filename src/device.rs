@@ -79,8 +79,9 @@ impl Atmos {
     fn send_data(&mut self, data: &[u8], flag: u8) -> io::Result<()> {
         self.session = (self.session + 1) % 60;
         let total = data.len().div_ceil(CHUNK_LEN);
-        for (i, chunk) in data.chunks(CHUNK_LEN).enumerate() {
-            let mut r = [0u8; REPORT_LEN];
+        // Build every report first so they can be queued back to back.
+        let mut reports = vec![0u8; total * REPORT_LEN];
+        for ((i, chunk), r) in data.chunks(CHUNK_LEN).enumerate().zip(reports.chunks_mut(REPORT_LEN)) {
             r[0] = DATA_REPORT;
             r[1] = 0x5C;
             r[2..4].copy_from_slice(&((chunk.len() + 20) as u16).to_be_bytes());
@@ -89,9 +90,8 @@ impl Atmos {
             r[7..9].copy_from_slice(&(i as u16).to_be_bytes());
             r[9] = flag;
             r[24..24 + chunk.len()].copy_from_slice(chunk);
-            self.hid.write(&r)?;
         }
-        Ok(())
+        self.hid.write_all(&reports)
     }
 
     fn exchange(&self, text: &str) -> io::Result<String> {

@@ -31,6 +31,7 @@ usage: atmos-lcd [command]
   preview <screen> <out.jpg>    render a screen to a file without the device
   gallery                       list gallery items
   import <file>                 add a picture, GIF/WebP or video to the gallery
+  bench <id> [fps...]           measure frame transfer speed with a gallery item
 screens:
   clock | system | gallery <id> | file <path>   (file: preview only)";
 
@@ -135,9 +136,78 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
+        "bench" => {
+            let fps: Vec<u32> = args[2..].iter().map(|a| a.parse()).collect::<Result<_, _>>()?;
+            bench(arg(1)?, if fps.is_empty() { &[15, 20, 25, 30] } else { &fps })?;
+        }
         "import" => child_result(gallery::import_in_process(std::path::Path::new(arg(1)?)))?,
         "rotate-item" => child_result(gallery::rotate_in_process(arg(1)?, arg(2)?.parse()?))?,
         _ => return Err(USAGE.into()),
+    }
+    Ok(())
+}
+
+/// Measures how fast frames reach the device, then plays at fixed rates for a visual check.
+fn bench(id: &str, rates: &[u32]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::{Duration, Instant};
+    let file = gallery::FrameFile::open(&gallery::frames_path(id, 0))?;
+    let frames: Vec<Vec<u8>> = (0..file.len()).map(|i| file.read(i)).collect::<Result<_, _>>()?;
+    let mut dev = Atmos::open()?;
+    dev.keep_realtime_alive()?;
+    let mut last_keepalive = Instant::now();
+    let mut keepalive = |dev: &mut Atmos| -> std::io::Result<()> {
+        if last_keepalive.elapsed() >= device::KEEPALIVE_INTERVAL {
+            dev.keep_realtime_alive()?;
+            last_keepalive = Instant::now();
+        }
+        Ok(())
+    };
+
+    let avg_kb = frames.iter().map(Vec::len).sum::<usize>() as f32 / frames.len() as f32 / 1024.0;
+    println!("{} frames, average {avg_kb:.1} KB ({:.0} reports)", frames.len(), avg_kb * 1024.0 / 1000.0);
+    let n = 120;
+    let start = Instant::now();
+    for i in 0..n {
+        keepalive(&mut dev)?;
+        dev.send_frame(&frames[i % frames.len()])?;
+    }
+    let per_frame = start.elapsed() / n as u32;
+    println!(
+        "back to back: {:.1} ms per frame -> max {:.1} fps, {:.0} KB/s",
+        per_frame.as_secs_f32() * 1000.0,
+        1.0 / per_frame.as_secs_f32(),
+        avg_kb / per_frame.as_secs_f32()
+    );
+
+    let mut text = render::TextRenderer::new();
+    for &rate in rates {
+        // Announce the phase on the LCD itself so it can be told apart while watching.
+        let mut label = render::new_canvas(render::rgb(0, 0, 0));
+        let style = render::TextStyle { size: 120.0, weight: cosmic_text::Weight::BOLD, ..Default::default() };
+        text.draw_centered(&mut label, &format!("{rate} fps"), 240.0, 240.0, &style);
+        let label = render::to_jpeg(&label);
+        let shown = Instant::now();
+        while shown.elapsed() < Duration::from_secs(2) {
+            keepalive(&mut dev)?;
+            dev.send_frame(&label)?;
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        println!("playing at {rate} fps for 10 s ...");
+        let interval = Duration::from_secs_f32(1.0 / rate as f32);
+        let (start, mut next, mut late) = (Instant::now(), Instant::now(), 0);
+        let mut i = 0;
+        while start.elapsed() < Duration::from_secs(10) {
+            keepalive(&mut dev)?;
+            dev.send_frame(&frames[i % frames.len()])?;
+            i += 1;
+            next += interval;
+            match next.checked_duration_since(Instant::now()) {
+                Some(wait) => std::thread::sleep(wait),
+                None => late += 1,
+            }
+        }
+        println!("  sent {i} frames ({:.1} fps actual), {late} late", i as f32 / 10.0);
     }
     Ok(())
 }
