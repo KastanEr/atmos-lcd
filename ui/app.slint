@@ -1,121 +1,247 @@
-import { Button, ComboBox, GroupBox, HorizontalBox, Slider, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, GroupBox, HorizontalBox, Palette, ScrollView, Slider, VerticalBox } from "std-widgets.slint";
+
+export struct GalleryTile {
+    id: string,
+    name: string,
+    thumb: image,
+    // e.g. "12s" for animations, empty for stills
+    badge: string,
+}
+
+component Tile inherits Rectangle {
+    in property <GalleryTile> tile;
+    in property <bool> selected;
+    callback clicked();
+    callback delete();
+
+    border-radius: 8px;
+    border-width: root.selected ? 3px : 1px;
+    border-color: root.selected ? Palette.accent-background : Palette.border;
+    clip: true;
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Image {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.width;
+        source: root.tile.thumb;
+        image-fit: cover;
+    }
+    if root.tile.badge != "": Rectangle {
+        x: 4px;
+        y: 4px;
+        width: badge-text.preferred-width + 8px;
+        height: 18px;
+        border-radius: 4px;
+        background: #000000a0;
+        badge-text := Text {
+            text: "▶ " + root.tile.badge;
+            color: white;
+            font-size: 11px;
+        }
+    }
+    // Delete button, shown on hover. Always present (only transparent) so its
+    // own hover state can keep it visible.
+    Rectangle {
+        opacity: area.has-hover || delete-area.has-hover ? 1 : 0;
+        x: parent.width - 24px;
+        y: 4px;
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: delete-area.has-hover ? #e53935 : #000000a0;
+        Text {
+            text: "×";
+            color: white;
+            font-size: 14px;
+        }
+        delete-area := TouchArea {
+            clicked => { root.delete(); }
+        }
+    }
+    Rectangle {
+        y: parent.width;
+        height: parent.height - parent.width;
+        background: Palette.alternate-background;
+        Text {
+            x: 4px;
+            width: parent.width - 8px;
+            text: root.tile.name;
+            font-size: 11px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+    }
+}
 
 export component AppWindow inherits Window {
     title: "Atmos LCD";
     icon: @image-url("icon.png");
     default-font-family: "Malgun Gothic";
-    preferred-width: 420px;
-    min-height: 640px;
+    preferred-width: 860px;
+    preferred-height: 560px;
+    min-width: 760px;
+    min-height: 520px;
 
     in property <image> preview;
     in property <string> status;
     in property <bool> connected;
-    // 0 = system, 1 = clock, 2 = image
+    // 0 = system, 1 = clock, 2 = gallery
     in-out property <int> screen-index;
-    in-out property <string> image-name;
     in-out property <float> brightness;
     // index into 0, 60, ... 300 degrees
     in-out property <int> rotation-index;
 
+    in property <[GalleryTile]> tiles;
+    in property <string> selected-id;
+    in property <string> gallery-summary;
+    // Shown while files are being converted; empty otherwise.
+    in property <string> import-status;
+
     callback settings-changed();
-    callback pick-image();
+    callback add-items();
+    callback select-item(string);
+    callback delete-item(string);
 
-    VerticalBox {
-        alignment: start;
-
-        Rectangle {
-            height: 260px;
+    HorizontalBox {
+        // Left: what the cooler shows and how.
+        VerticalBox {
+            alignment: start;
+            width: 320px;
             Rectangle {
-                width: 240px;
-                height: 240px;
-                border-radius: 12px;
-                clip: true;
-                background: #0a0c14;
-                Image {
-                    width: parent.width;
-                    height: parent.height;
-                    source: root.preview;
-                    // Show the screen as it appears on the cooler.
-                    transform-rotation: root.rotation-index * 60deg;
+                height: 260px;
+                Rectangle {
+                    width: 240px;
+                    height: 240px;
+                    border-radius: 12px;
+                    clip: true;
+                    background: #0a0c14;
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.preview;
+                        // Show the screen as it appears on the cooler.
+                        transform-rotation: root.rotation-index * 60deg;
+                    }
                 }
             }
-        }
 
-        HorizontalBox {
-            alignment: center;
-            Rectangle {
-                width: 10px;
-                height: 10px;
-                border-radius: 5px;
-                background: root.connected ? #4caf50 : #e57373;
+            HorizontalBox {
+                alignment: center;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: root.connected ? #4caf50 : #e57373;
+                }
+                Text {
+                    text: root.status;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    max-width: 280px;
+                }
             }
-            Text {
-                text: root.status;
-                vertical-alignment: center;
-            }
-        }
 
-        GroupBox {
-            title: "화면";
-            VerticalBox {
+            GroupBox {
+                title: "화면";
                 ComboBox {
-                    model: ["시스템 (CPU / GPU)", "시계", "사진"];
+                    model: ["시스템 (CPU / GPU)", "시계", "갤러리"];
                     current-index <=> root.screen-index;
                     selected => { root.settings-changed(); }
                 }
-                if root.screen-index == 2: HorizontalBox {
+            }
+
+            GroupBox {
+                title: "디스플레이";
+                VerticalBox {
+                    HorizontalBox {
+                        padding: 0;
+                        Text {
+                            text: "밝기";
+                            min-width: 50px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            minimum: 0;
+                            maximum: 100;
+                            value <=> root.brightness;
+                            released => { root.settings-changed(); }
+                        }
+                        Text {
+                            text: Math.round(root.brightness) + "%";
+                            min-width: 40px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalBox {
+                        padding: 0;
+                        Text {
+                            text: "회전";
+                            min-width: 50px;
+                            vertical-alignment: center;
+                        }
+                        ComboBox {
+                            model: ["0°", "60°", "120°", "180°", "240°", "300°"];
+                            current-index <=> root.rotation-index;
+                            selected => { root.settings-changed(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right: registered media.
+        GroupBox {
+            title: "갤러리";
+            vertical-stretch: 1;
+            VerticalBox {
+                padding: 0;
+                HorizontalBox {
                     padding: 0;
                     Text {
-                        text: root.image-name == "" ? "선택된 사진 없음" : root.image-name;
+                        text: root.import-status != "" ? root.import-status : root.gallery-summary;
                         overflow: elide;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                     }
                     Button {
-                        text: "사진 선택…";
-                        clicked => { root.pick-image(); }
+                        text: "추가…";
+                        clicked => { root.add-items(); }
+                    }
+                }
+                ScrollView {
+                    property <length> tile-w: 104px;
+                    property <length> tile-h: 126px;
+                    property <length> gap: 10px;
+                    // As many columns as fit the current width.
+                    property <int> columns: Math.max(1, Math.floor((self.visible-width + gap) / (tile-w + gap)));
+                    vertical-stretch: 1;
+                    content-height: Math.ceil(root.tiles.length / columns) * (tile-h + gap);
+                    for tile[i] in root.tiles: Tile {
+                        x: Math.mod(i, columns) * (tile-w + gap);
+                        y: Math.floor(i / columns) * (tile-h + gap);
+                        width: tile-w;
+                        height: tile-h;
+                        tile: tile;
+                        selected: tile.id == root.selected-id && root.screen-index == 2;
+                        clicked => { root.select-item(tile.id); }
+                        delete => { root.delete-item(tile.id); }
+                    }
+                    if root.tiles.length == 0: Text {
+                        width: parent.width;
+                        height: 120px;
+                        text: "\"추가…\"로 사진, GIF, 동영상을 등록하세요";
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        color: Palette.foreground.with-alpha(0.6);
                     }
                 }
             }
         }
 
-        GroupBox {
-            title: "디스플레이";
-            VerticalBox {
-                HorizontalBox {
-                    padding: 0;
-                    Text {
-                        text: "밝기";
-                        min-width: 50px;
-                        vertical-alignment: center;
-                    }
-                    Slider {
-                        minimum: 0;
-                        maximum: 100;
-                        value <=> root.brightness;
-                        released => { root.settings-changed(); }
-                    }
-                    Text {
-                        text: Math.round(root.brightness) + "%";
-                        min-width: 40px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                }
-                HorizontalBox {
-                    padding: 0;
-                    Text {
-                        text: "회전";
-                        min-width: 50px;
-                        vertical-alignment: center;
-                    }
-                    ComboBox {
-                        model: ["0°", "60°", "120°", "180°", "240°", "300°"];
-                        current-index <=> root.rotation-index;
-                        selected => { root.settings-changed(); }
-                    }
-                }
-            }
-        }
     }
 }

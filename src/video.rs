@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFDXGIDeviceManager, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MFCreateDXGIDeviceManager, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    MF_PD_DURATION, MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MFCreateDXGIDeviceManager, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
     MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes,
     MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
@@ -32,12 +32,14 @@ pub fn is_video(path: &Path) -> bool {
 }
 
 /// Decodes `path`, calling `on_frame(image, delay)` for frames spaced at least
-/// `interval` apart, up to `max_len` of video. Returns whether the video was cut short.
+/// `interval` apart, up to `max_len` of video, and `on_progress` with 0.0..=1.0.
+/// Returns whether the video was cut short.
 pub fn decode(
     path: &Path,
     interval: Duration,
     max_len: Duration,
     mut on_frame: impl FnMut(DynamicImage, Duration),
+    mut on_progress: impl FnMut(f32),
 ) -> Result<bool, String> {
     let _mf = MediaFoundation::start().map_err(|e| format!("Media Foundation: {e}"))?;
     let err = |e: windows::core::Error| format!("{}: {}", path.display(), e.message());
@@ -47,6 +49,7 @@ pub fn decode(
     // Media Foundation timestamps are in 100 ns units.
     let interval_ticks = interval.as_nanos() as i64 / 100;
     let max_ticks = max_len.as_nanos() as i64 / 100;
+    let total_ticks = duration_ticks(&reader).unwrap_or(max_ticks).clamp(1, max_ticks);
     // Pick frames on a fixed grid so a 30 fps source yields every other frame.
     // The tolerance absorbs timestamp rounding (e.g. 333333 vs 333334 ticks).
     let tolerance = interval_ticks / 10;
@@ -98,11 +101,20 @@ pub fn decode(
         if let Some((prev, prev_ts)) = pending.replace((image, timestamp)) {
             on_frame(prev, ticks_to_duration(timestamp - prev_ts));
         }
+        on_progress((timestamp as f32 / total_ticks as f32).min(1.0));
     }
     if let Some((last, _)) = pending {
         on_frame(last, interval);
     }
     Ok(truncated)
+}
+
+/// Container duration in 100 ns ticks, if the file states one.
+fn duration_ticks(reader: &IMFSourceReader) -> Option<i64> {
+    unsafe {
+        let pv = reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION).ok()?;
+        Some(pv.Anonymous.Anonymous.Anonymous.uhVal as i64)
+    }
 }
 
 fn ticks_to_duration(ticks: i64) -> Duration {

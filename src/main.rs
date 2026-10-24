@@ -5,6 +5,7 @@ mod app;
 mod autostart;
 mod config;
 mod device;
+mod gallery;
 mod hid;
 mod media;
 mod render;
@@ -28,8 +29,10 @@ usage: atmos-lcd [command]
   rotate <degrees>              e.g. 60 for a hexagonal pump; saved to config
   run <screen>                  show a screen in the foreground until Ctrl+C
   preview <screen> <out.jpg>    render a screen to a file without the device
+  gallery                       list gallery items
+  import <file>                 add a picture, GIF/WebP or video to the gallery
 screens:
-  clock | system | image <file>   (image: picture, GIF/WebP or video)";
+  clock | system | gallery <id> | file <path>   (file: preview only)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,20 +54,29 @@ fn main() -> ExitCode {
     }
 }
 
-/// Applies `<screen> [file]` to the saved config and returns the remaining args.
+/// Applies `<screen> [arg]` to the saved config and returns the remaining args.
 fn with_screen<'a>(args: &'a [String], mut config: Config) -> Result<(Config, &'a [String]), &'static str> {
     match args.first().map(String::as_str) {
         Some(s @ ("clock" | "system")) => {
             config.screen = s.into();
             Ok((config, &args[1..]))
         }
-        Some("image") => {
-            config.screen = "image".into();
-            config.image = Some(args.get(1).ok_or(USAGE)?.into());
+        Some("gallery") => {
+            config.screen = "gallery".into();
+            config.item = Some(args.get(1).ok_or(USAGE)?.clone());
             Ok((config, &args[2..]))
         }
         _ => Err(USAGE),
     }
+}
+
+/// Child-process protocol used by `gallery::run_child`.
+fn child_result(result: Result<String, String>) -> Result<(), Box<dyn std::error::Error>> {
+    match result {
+        Ok(v) => println!("done {v}"),
+        Err(e) => println!("error {}", e.replace('\n', " ")),
+    }
+    Ok(())
 }
 
 fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -88,11 +100,10 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "preview" => {
-            let (config, rest) = with_screen(&args[1..], Config::load())?;
-            let out = rest.first().ok_or(USAGE)?;
-            let rotation = config.split_rotation().1;
-            let jpeg = match (config.screen.as_str(), &config.image) {
-                ("image", Some(path)) => match media::load(path, rotation)? {
+            let rotation = Config::load().split_rotation().1;
+            let (jpeg, out) = if args.get(1).map(String::as_str) == Some("file") {
+                let path = std::path::Path::new(arg(2)?);
+                let jpeg = match media::load(path, rotation)? {
                     Media::Still(canvas) => render::to_jpeg(&render::rotate(&canvas, rotation)),
                     Media::Animated(anim) => {
                         let total: std::time::Duration = anim.frames.iter().map(|f| f.delay).sum();
@@ -100,17 +111,32 @@ fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         println!("animation: {} frames, {:.1} s per loop{cut}", anim.frames.len(), total.as_secs_f32());
                         anim.frames[0].wire.clone()
                     }
-                },
-                _ => {
-                    let mut renderer = Renderer::new();
-                    // CPU load needs two samples to measure an interval.
-                    renderer.draw(&config);
-                    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-                    render::to_jpeg(&render::rotate(&renderer.draw(&config), rotation))
-                }
+                };
+                (jpeg, arg(3)?)
+            } else {
+                let (config, rest) = with_screen(&args[1..], Config::load())?;
+                let mut renderer = Renderer::new();
+                // CPU load needs two samples to measure an interval.
+                renderer.draw(&config);
+                std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+                (render::to_jpeg(&render::rotate(&renderer.draw(&config), rotation)), rest.first().ok_or(USAGE)?.as_str())
             };
             std::fs::write(out, jpeg)?;
         }
+        "gallery" => {
+            for item in gallery::list() {
+                println!(
+                    "{}  {:>4} frames  {:>5.1} s  {:>6.1} MB  {}",
+                    item.id,
+                    item.frames,
+                    item.duration.as_secs_f32(),
+                    item.bytes as f32 / 1e6,
+                    item.name
+                );
+            }
+        }
+        "import" => child_result(gallery::import_in_process(std::path::Path::new(arg(1)?)))?,
+        "rotate-item" => child_result(gallery::rotate_in_process(arg(1)?, arg(2)?.parse()?))?,
         _ => return Err(USAGE.into()),
     }
     Ok(())

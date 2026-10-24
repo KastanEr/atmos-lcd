@@ -7,14 +7,15 @@ pub struct Config {
     /// Clockwise screen rotation in degrees, 0..360.
     pub rotation: u16,
     pub brightness: u8,
-    /// `clock`, `system` or `image`.
+    /// `clock`, `system` or `gallery`.
     pub screen: String,
-    pub image: Option<PathBuf>,
+    /// Gallery item id shown by the `gallery` screen.
+    pub item: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { rotation: 0, brightness: 80, screen: "system".into(), image: None }
+        Config { rotation: 0, brightness: 80, screen: "system".into(), item: None }
     }
 }
 
@@ -39,7 +40,7 @@ impl Config {
                 "rotation" => c.rotation = value.parse().map_or(c.rotation, |r: u16| r % 360),
                 "brightness" => c.brightness = value.parse().map_or(c.brightness, |b: u8| b.min(100)),
                 "screen" => c.screen = value.to_string(),
-                "image" if !value.is_empty() => c.image = Some(value.into()),
+                "item" if !value.is_empty() => c.item = Some(value.into()),
                 _ => {}
             }
         }
@@ -51,10 +52,12 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let image = self.image.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
         let text = format!(
-            "rotation={}\nbrightness={}\nscreen={}\nimage={image}\n",
-            self.rotation, self.brightness, self.screen
+            "rotation={}\nbrightness={}\nscreen={}\nitem={}\n",
+            self.rotation,
+            self.brightness,
+            self.screen,
+            self.item.as_deref().unwrap_or("")
         );
         std::fs::write(path, text)
     }

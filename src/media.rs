@@ -44,9 +44,14 @@ pub enum Media {
 
 /// Loads any supported file. Slow for videos; call off the streaming thread.
 pub fn load(path: &Path, extra_rotation: f32) -> Result<Media, String> {
+    load_with_progress(path, extra_rotation, |_| {})
+}
+
+/// Like `load`, reporting video decoding progress as 0.0..=1.0.
+pub fn load_with_progress(path: &Path, extra_rotation: f32, progress: impl FnMut(f32)) -> Result<Media, String> {
     if video::is_video(path) {
         let mut builder = Builder::new(extra_rotation);
-        let truncated = video::decode(path, MIN_FRAME, MAX_VIDEO, |img, delay| builder.push(img, delay))?;
+        let truncated = video::decode(path, MIN_FRAME, MAX_VIDEO, |img, delay| builder.push(img, delay), progress)?;
         return builder
             .finish(truncated)
             .map(Media::Animated)

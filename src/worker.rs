@@ -2,7 +2,6 @@
 //! streams it, keeps realtime mode alive and reconnects when the cooler
 //! disappears (USB reset, sleep/resume).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
@@ -12,7 +11,7 @@ use tiny_skia::Pixmap;
 
 use crate::config::Config;
 use crate::device::{Atmos, KEEPALIVE_INTERVAL};
-use crate::media::{self, Animation, Media};
+use crate::gallery::{self, FrameFile};
 use crate::render::{self, TextRenderer};
 use crate::scenes;
 use crate::stats::Stats;
@@ -24,8 +23,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
-    /// Streaming; optionally with a note about the content (e.g. a cut video).
-    Connected(Option<String>),
+    Connected,
     Loading,
     NotFound,
     Error(String),
@@ -55,47 +53,64 @@ impl Renderer {
 enum Playing {
     Nothing,
     Still(Vec<u8>),
-    Animation { media: Arc<Media>, index: usize },
+    /// A gallery animation, read from disk one frame at a time.
+    Frames { file: Arc<FrameFile>, index: usize, buf: Vec<u8> },
 }
 
 impl Playing {
-    fn animation(&self) -> Option<(&Animation, usize)> {
+    fn current(&mut self) -> std::io::Result<Option<&[u8]>> {
         match self {
-            Playing::Animation { media, index } => match media.as_ref() {
-                Media::Animated(a) => Some((a, *index)),
-                Media::Still(_) => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn current(&self) -> Option<&[u8]> {
-        match self {
-            Playing::Still(f) => Some(f),
-            _ => self.animation().map(|(a, i)| a.frames[i].wire.as_slice()),
+            Playing::Nothing => Ok(None),
+            Playing::Still(f) => Ok(Some(f)),
+            Playing::Frames { file, index, buf } => {
+                file.read_into(*index, buf)?;
+                Ok(Some(buf))
+            }
         }
     }
 
     /// When the current frame should be sent again or replaced.
     fn interval(&self) -> Duration {
-        self.animation().map_or(RESEND_INTERVAL, |(a, i)| a.frames[i].delay)
+        match self {
+            Playing::Frames { file, index, .. } => file.delay(*index),
+            _ => RESEND_INTERVAL,
+        }
     }
 
     fn advance(&mut self) {
-        let len = self.animation().map(|(a, _)| a.frames.len());
-        if let (Playing::Animation { index, .. }, Some(len)) = (self, len) {
-            *index = (*index + 1) % len;
+        if let Playing::Frames { file, index, .. } = self {
+            *index = (*index + 1) % file.len();
         }
+    }
+
+    fn is_file(&self, other: &Arc<FrameFile>) -> bool {
+        matches!(self, Playing::Frames { file, .. } if Arc::ptr_eq(file, other))
     }
 }
 
-/// A loaded file depends on its path and on the rotation baked into animation frames.
-type MediaKey = (PathBuf, u16);
+/// A gallery item as streamed: its id and the software rotation baked into the frames.
+type ItemKey = (String, u16);
 
 enum Msg {
     Config(Config),
-    Loaded(MediaKey, Result<Media, String>),
+    Loaded(ItemKey, Result<FrameFile, String>),
     Quit,
+}
+
+/// First frame of the unrotated item, for the preview.
+fn item_poster(id: &str) -> Option<Pixmap> {
+    let jpeg = FrameFile::open(&gallery::frames_path(id, 0)).and_then(|f| f.read(0)).ok()?;
+    gallery::decode_frame(&jpeg).ok()
+}
+
+/// Opens the item's frames for `key`, generating the rotated copy first if needed (slow).
+fn open_item(key: &ItemKey) -> Result<FrameFile, String> {
+    let (id, rotation) = key;
+    let path = gallery::frames_path(id, *rotation);
+    if !path.exists() && *rotation != 0 {
+        gallery::make_rotated(id, *rotation)?;
+    }
+    FrameFile::open(&path).map_err(|e| format!("갤러리 항목을 열 수 없음: {e}"))
 }
 
 pub struct Worker {
@@ -128,11 +143,10 @@ impl Worker {
             let now = Instant::now();
             let (mut next_connect, mut next_keepalive, mut next_draw, mut next_send) = (now, now, now, now);
             let mut playing = Playing::Nothing;
-            let mut media: Option<(MediaKey, Arc<Media>)> = None;
-            let mut loading: Option<MediaKey> = None;
-            // Problem or note about what is shown, reported instead of a plain "connected".
+            let mut item: Option<(ItemKey, Arc<FrameFile>)> = None;
+            let mut loading: Option<ItemKey> = None;
+            // Problem with what is shown, reported instead of a plain "connected".
             let mut content_error: Option<String> = None;
-            let mut content_note: Option<String> = None;
             // Settings that must be pushed to the device (on change or reconnect).
             let mut dirty = true;
 
@@ -150,7 +164,7 @@ impl Worker {
                         if loading.as_ref() == Some(&key) {
                             loading = None;
                             match result {
-                                Ok(m) => media = Some((key, Arc::new(m))),
+                                Ok(f) => item = Some((key, Arc::new(f))),
                                 Err(e) => content_error = Some(e),
                             }
                             next_draw = Instant::now();
@@ -164,52 +178,50 @@ impl Worker {
                 if now >= next_draw {
                     // Files don't change by themselves; they wait for the next config or load result.
                     next_draw = now + Duration::from_secs(3600);
-                    if config.screen != "image" {
+                    if config.screen != "gallery" {
                         let canvas = renderer.draw(&config);
                         (hooks.frame)(&canvas);
                         playing = Playing::Still(render::to_jpeg(&render::rotate(&canvas, config.split_rotation().1)));
-                        (content_error, content_note) = (None, None);
+                        content_error = None;
                         next_draw = now + LIVE_REDRAW;
                         next_send = now;
-                    } else if let Some(path) = &config.image {
-                        let key = (path.clone(), config.rotation);
-                        match &media {
-                            Some((k, m)) if *k == key => {
-                                (content_error, content_note) = (None, None);
-                                match m.as_ref() {
-                                    Media::Still(canvas) => {
-                                        (hooks.frame)(canvas);
-                                        let rotated = render::rotate(canvas, config.split_rotation().1);
-                                        playing = Playing::Still(render::to_jpeg(&rotated));
+                    } else if let Some(id) = &config.item {
+                        let key = (id.clone(), config.split_rotation().1 as u16);
+                        match &item {
+                            Some((k, file)) if *k == key => {
+                                content_error = None;
+                                if !playing.is_file(file) {
+                                    if let Some(poster) = item_poster(id) {
+                                        (hooks.frame)(&poster);
                                     }
-                                    Media::Animated(a) => {
-                                        if a.truncated {
-                                            content_note = Some("영상이 길어 앞 1분만 재생".into());
+                                    playing = if file.len() == 1 {
+                                        match file.read(0) {
+                                            Ok(jpeg) => Playing::Still(jpeg),
+                                            Err(e) => {
+                                                content_error = Some(e.to_string());
+                                                Playing::Nothing
+                                            }
                                         }
-                                        let same = matches!(&playing, Playing::Animation { media, .. } if Arc::ptr_eq(media, m));
-                                        if !same {
-                                            (hooks.frame)(&a.poster);
-                                            playing = Playing::Animation { media: m.clone(), index: 0 };
-                                        }
-                                    }
+                                    } else {
+                                        Playing::Frames { file: file.clone(), index: 0, buf: Vec::new() }
+                                    };
                                 }
                                 next_send = now;
                             }
                             _ if loading.as_ref() != Some(&key) => {
-                                // Decoding can take seconds; keep streaming the old content meanwhile.
+                                // Rotated copies take a while to make; keep streaming meanwhile.
                                 loading = Some(key.clone());
                                 content_error = None;
                                 let tx = loader_tx.clone();
-                                let rotation = config.split_rotation().1;
                                 thread::spawn(move || {
-                                    let result = media::load(&key.0, rotation);
+                                    let result = open_item(&key);
                                     let _ = tx.send(Msg::Loaded(key, result));
                                 });
                             }
                             _ => {}
                         }
                     } else {
-                        content_error = Some("사진이나 동영상을 선택하세요".into());
+                        content_error = Some("갤러리에서 항목을 선택하세요".into());
                     }
                 }
 
@@ -247,7 +259,7 @@ impl Worker {
                         d.keep_realtime_alive()?;
                         next_keepalive = now + KEEPALIVE_INTERVAL;
                     }
-                    if send_due && let Some(f) = playing.current() {
+                    if send_due && let Some(f) = playing.current()? {
                         d.send_frame(f)?;
                     }
                     Ok(())
@@ -259,7 +271,7 @@ impl Worker {
                     Ok(()) => set_status(match (&content_error, &loading) {
                         (Some(e), _) => Status::Error(e.clone()),
                         (None, Some(_)) => Status::Loading,
-                        (None, None) => Status::Connected(content_note.clone()),
+                        (None, None) => Status::Connected,
                     }),
                     Err(e) => {
                         set_status(Status::Error(e.to_string()));
