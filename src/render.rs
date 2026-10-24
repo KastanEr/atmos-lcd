@@ -102,13 +102,24 @@ pub struct TextStyle<'a> {
 
 impl Default for TextStyle<'_> {
     fn default() -> Self {
-        TextStyle { size: 32.0, weight: Weight::NORMAL, family: Family::Name("Segoe UI"), color: rgb(255, 255, 255) }
+        TextStyle { size: 32.0, weight: Weight::NORMAL, family: Family::Name("Pretendard"), color: rgb(255, 255, 255) }
     }
 }
 
 impl TextRenderer {
+    /// Uses only the bundled Pretendard, the same face as the settings window. Skipping the
+    /// system font scan also makes this quick and small.
     pub fn new() -> TextRenderer {
-        TextRenderer { fonts: FontSystem::new(), cache: SwashCache::new() }
+        const FACES: [&[u8]; 3] = [
+            include_bytes!("../ui/fonts/Pretendard-Regular.otf"),
+            include_bytes!("../ui/fonts/Pretendard-SemiBold.otf"),
+            include_bytes!("../ui/fonts/Pretendard-Bold.otf"),
+        ];
+        let mut db = cosmic_text::fontdb::Database::new();
+        for face in FACES {
+            db.load_font_source(cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(face)));
+        }
+        TextRenderer { fonts: FontSystem::new_with_locale_and_db("ko-KR".into(), db), cache: SwashCache::new() }
     }
 
     /// Draws one line of text horizontally centered on `cx`, vertically centered on `cy`.

@@ -25,26 +25,6 @@ global Theme {
     out property <color> raised-edge: #0000002e;
 }
 
-// Soft shadow made of stacked translucent rounded rectangles (no renderer support
-// for drop-shadow). Place it behind the element, same geometry.
-component SoftShadow inherits Rectangle {
-    in property <length> radius;
-    // Mostly below the element and faint, so the steps between layers don't show.
-    for layer in [
-        { spread: 1px, drop: 3px, alpha: 0.05 },
-        { spread: 4px, drop: 7px, alpha: 0.03 },
-        { spread: 8px, drop: 12px, alpha: 0.018 },
-        { spread: 13px, drop: 18px, alpha: 0.01 },
-    ]: Rectangle {
-        x: -layer.spread;
-        y: -layer.spread + layer.drop;
-        width: root.width + 2 * layer.spread;
-        height: root.height + 2 * layer.spread;
-        border-radius: root.radius + layer.spread;
-        background: Colors.black.with-alpha(layer.alpha);
-    }
-}
-
 export struct GalleryTile {
     id: string,
     name: string,
@@ -450,8 +430,9 @@ export component AppWindow inherits Window {
     preferred-height: 640px;
     min-width: 760px;
 
-    // Corners already rounded (transparent) by the app.
+    // Scaled to the exact pixel size, corners rounded (transparent), by the app.
     in property <image> preview;
+    in property <image> preview-shadow;
     // 0 connected, 1 searching, 2 busy, 3 error
     in property <int> status-kind: 1;
     in property <string> status: "찾는 중";
@@ -509,10 +490,15 @@ export component AppWindow inherits Window {
                     Rectangle {
                         width: 208px;
                         height: 208px;
-                        SoftShadow {
-                            width: parent.width;
-                            height: parent.height;
-                            radius: 22px;
+                        // Blurred shadow image from the app (no drop-shadow in the software
+                        // renderer); it extends 28px past the preview on every side.
+                        Image {
+                            x: -28px;
+                            y: -28px;
+                            width: parent.width + 56px;
+                            height: parent.height + 56px;
+                            source: root.preview-shadow;
+                            image-fit: fill;
                         }
                         Rectangle {
                             border-radius: 22px;
@@ -570,6 +556,7 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         padding-left: 14px;
+                        padding-right: 14px;
                         Separator { }
                     }
                     HorizontalLayout {
@@ -599,6 +586,7 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         padding-left: 14px;
+                        padding-right: 14px;
                         Separator { }
                     }
                     HorizontalLayout {

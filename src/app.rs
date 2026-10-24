@@ -132,6 +132,10 @@ struct App {
     storing: Vec<Option<Storing>>,
     /// Clears `notice` after a while.
     notice_timer: slint::Timer,
+    /// Physical pixels per logical pixel the images were last prepared for.
+    scale: f32,
+    /// Latest unrotated preview frame (480x480 RGBA), kept to redo it at a new scale.
+    last_frame: Option<Vec<u8>>,
 }
 
 /// A gallery item on its way into a storage slot.
@@ -153,6 +157,38 @@ impl App {
         self.tray.sync(&config);
         load_into_window(&self.window, &config);
         self.config = config;
+    }
+
+    /// Shows the settings window and prepares images for its actual display scale.
+    fn show(&mut self) {
+        let _ = self.window.show();
+        self.window.window().set_minimized(false);
+        self.rescale();
+        // The scale factor can settle only once the native window exists.
+        self.notice_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(200), || {
+            with_app(|app| app.rescale());
+        });
+    }
+
+    fn rescale(&mut self) {
+        let scale = self.window.window().scale_factor();
+        if scale == self.scale {
+            return;
+        }
+        self.scale = scale;
+        self.window.set_preview_shadow(soft_shadow(scale));
+        if let Some(frame) = self.last_frame.take() {
+            self.set_preview_frame(frame);
+        }
+        self.refresh_gallery();
+        self.refresh_slots();
+    }
+
+    fn set_preview_frame(&mut self, rgba: Vec<u8>) {
+        if let Some(img) = image::RgbaImage::from_raw(SIZE, SIZE, rgba.clone()) {
+            self.window.set_preview(display_image(&img, PREVIEW_SIZE, PREVIEW_RADIUS, self.scale));
+        }
+        self.last_frame = Some(rgba);
     }
 
     /// Shows a short message under the status badge for a few seconds.
@@ -181,7 +217,8 @@ impl App {
             .map(|item| GalleryTile {
                 id: item.id.as_str().into(),
                 name: item.name.as_str().into(),
-                thumb: load_thumb(&item.id),
+                thumb: gallery::thumbnail_image(&item.id)
+                    .map_or_else(Image::default, |img| display_image(&img, TILE_SIZE, TILE_RADIUS, self.scale)),
                 badge: if item.is_animated() {
                     let secs = item.duration.as_secs_f32().round() as u64;
                     format!("{}:{:02}", secs / 60, secs % 60).into()
@@ -246,7 +283,7 @@ impl App {
         let tiles: Vec<SlotTile> = (0..slots::COUNT)
             .map(|i| {
                 let name = slots::name(i).unwrap_or_default();
-                let thumb = if name.is_empty() { Image::default() } else { load_image(&slots::thumb_path(i)) };
+                let thumb = if name.is_empty() { Image::default() } else { load_image(&slots::thumb_path(i), SLOT_SIZE, self.scale) };
                 let job = self.storing[i].as_ref();
                 SlotTile {
                     thumb,
@@ -343,7 +380,7 @@ impl App {
 
     fn handle_menu(&mut self, id: &MenuId) {
         if id == self.tray.open.id() {
-            show_window(&self.window);
+            self.show();
         } else if id == self.tray.offline.id() {
             self.toggle_offline();
         } else if id == self.tray.autostart.id() {
@@ -358,7 +395,7 @@ impl App {
                 self.tray.sync(&self.config);
                 self.window.set_screen_index(i as i32);
                 self.notify("갤러리에서 항목을 선택하세요");
-                show_window(&self.window);
+                self.show();
                 return;
             }
             self.apply(c);
@@ -389,39 +426,80 @@ fn load_into_window(w: &AppWindow, c: &Config) {
     w.set_offline(c.offline);
 }
 
-/// Corner radii in source pixels, matching the UI's rounded rectangles at their
-/// displayed sizes (preview: 22 px at 208 px of 480; thumbnails: 10 px at 110 px of 160).
-const PREVIEW_RADIUS: f32 = 51.0;
-const THUMB_RADIUS: f32 = 15.0;
+// Logical sizes and corner radii of the images in the window (see app.slint).
+const PREVIEW_SIZE: f32 = 208.0;
+const PREVIEW_RADIUS: f32 = 22.0;
+const TILE_SIZE: f32 = 110.0;
+const SLOT_SIZE: f32 = 120.0;
+const TILE_RADIUS: f32 = 10.0;
+/// The preview's shadow: blur radius, how far it drops, and its opacity.
+const SHADOW_BLUR: f32 = 14.0;
+const SHADOW_DROP: f32 = 8.0;
+const SHADOW_ALPHA: f32 = 0.22;
 
-fn load_thumb(id: &str) -> Image {
-    load_image(&gallery::thumb_path(id))
+/// Scales an image to exactly `logical` px at the window's `scale` and rounds its corners.
+/// The software renderer scales with nearest-neighbour sampling (jagged) and cannot clip
+/// to rounded corners, so both are done here.
+fn display_image(img: &image::RgbaImage, logical: f32, radius: f32, scale: f32) -> Image {
+    let px = (logical * scale).round().max(1.0) as u32;
+    let sized = if img.dimensions() == (px, px) {
+        img.clone()
+    } else {
+        image::imageops::resize(img, px, px, image::imageops::FilterType::CatmullRom)
+    };
+    Image::from_rgba8(rounded(sized.as_raw(), px, px, radius * scale))
 }
 
-fn load_image(path: &std::path::Path) -> Image {
-    let Ok(img) = image::open(path) else { return Image::default() };
-    let img = img.into_rgba8();
-    Image::from_rgba8(rounded(img.as_raw(), img.width(), img.height(), THUMB_RADIUS))
+fn load_image(path: &std::path::Path, logical: f32, scale: f32) -> Image {
+    match image::open(path) {
+        Ok(img) => display_image(&img.into_rgba8(), logical, TILE_RADIUS, scale),
+        Err(_) => Image::default(),
+    }
+}
+
+/// A blurred rounded rectangle for behind the preview, `2 * SHADOW_BLUR` larger on each side.
+fn soft_shadow(scale: f32) -> Image {
+    let margin = (2.0 * SHADOW_BLUR * scale).round() as u32;
+    let size = (PREVIEW_SIZE * scale).round() as u32;
+    let drop = (SHADOW_DROP * scale).round() as u32;
+    let full = size + 2 * margin;
+    let radius = PREVIEW_RADIUS * scale;
+    let mut shape = image::RgbaImage::new(full, full);
+    for y in 0..size.min(full - margin - drop) {
+        for x in 0..size {
+            let a = 255.0 * SHADOW_ALPHA * corner_coverage(x, y, size, size, radius);
+            shape.put_pixel(x + margin, y + margin + drop, image::Rgba([0, 0, 0, a as u8]));
+        }
+    }
+    let blurred = image::imageops::blur(&shape, SHADOW_BLUR * scale / 2.0);
+    Image::from_rgba8(SharedPixelBuffer::clone_from_slice(blurred.as_raw(), full, full))
+}
+
+/// Share of pixel (x, y) inside a `width` x `height` rectangle with corners rounded by `radius`.
+fn corner_coverage(x: u32, y: u32, width: u32, height: u32, radius: f32) -> f32 {
+    let (w, h) = (width as f32, height as f32);
+    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+    // Distance from the pixel center to the nearest corner circle's center, per axis.
+    let dx = (radius - px).max(px - (w - radius)).max(0.0);
+    let dy = (radius - py).max(py - (h - radius)).max(0.0);
+    if dx == 0.0 || dy == 0.0 {
+        return 1.0;
+    }
+    (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0)
 }
 
 /// Copies straight RGBA pixels with the corners outside `radius` made transparent
 /// (antialiased). The software renderer cannot clip images to rounded corners.
 fn rounded(rgba: &[u8], width: u32, height: u32, radius: f32) -> SharedPixelBuffer<Rgba8Pixel> {
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba, width, height);
-    let (w, h) = (width as f32, height as f32);
     let pixels = buffer.make_mut_slice();
     for y in 0..height {
         for x in 0..width {
-            // Distance from the pixel center to the nearest corner circle's center.
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let dx = (radius - px).max(px - (w - radius)).max(0.0);
-            let dy = (radius - py).max(py - (h - radius)).max(0.0);
-            if dx == 0.0 || dy == 0.0 {
-                continue;
+            let coverage = corner_coverage(x, y, width, height, radius);
+            if coverage < 1.0 {
+                let p = &mut pixels[(y * width + x) as usize];
+                p.a = (p.a as f32 * coverage) as u8;
             }
-            let coverage = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-            let p = &mut pixels[(y * width + x) as usize];
-            p.a = (p.a as f32 * coverage) as u8;
         }
     }
     buffer
@@ -448,7 +526,7 @@ pub fn show_running_instance() {
 }
 
 /// Shows the window whenever another launch signals `SHOW_EVENT`.
-fn listen_for_show(window: slint::Weak<AppWindow>) {
+fn listen_for_show() {
     use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
     let name = wide(SHOW_EVENT);
     // Auto-reset; the handle lives as long as the process.
@@ -458,15 +536,11 @@ fn listen_for_show(window: slint::Weak<AppWindow>) {
     }
     std::thread::spawn(move || {
         while unsafe { WaitForSingleObject(event as _, INFINITE) } == 0 {
-            let _ = window.upgrade_in_event_loop(|w| show_window(&w));
+            with_app(|app| app.show());
         }
     });
 }
 
-fn show_window(w: &AppWindow) {
-    let _ = w.show();
-    w.window().set_minimized(false);
-}
 
 fn pick_files() -> Vec<PathBuf> {
     rfd::FileDialog::new()
@@ -488,14 +562,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     load_into_window(&window, &config);
 
     let hooks = {
-        let frame_window = window.as_weak();
         let status_window = window.as_weak();
         Hooks {
             frame: Box::new(move |pixmap| {
-                let buffer = rounded(pixmap.data(), SIZE, SIZE, PREVIEW_RADIUS);
                 // Always store it: static screens (images) are drawn only once, possibly
                 // while the window is hidden. A hidden window does not repaint, so this is cheap.
-                let _ = frame_window.upgrade_in_event_loop(move |w| w.set_preview(Image::from_rgba8(buffer)));
+                let rgba = pixmap.data().to_vec();
+                with_app(move |app| app.set_preview_frame(rgba));
             }),
             status: Box::new(move |status| {
                 // Badge kinds: 0 connected, 1 searching, 2 busy, 3 error (see StatusBadge).
@@ -533,7 +606,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         device_slots: vec![false; slots::COUNT],
         storing: (0..slots::COUNT).map(|_| None).collect(),
         notice_timer: slint::Timer::default(),
+        // Unknown until the window is shown; `rescale` replaces it.
+        scale: 0.0,
+        last_frame: None,
     }));
+    app.borrow_mut().rescale();
     app.borrow().refresh_slots();
     app.borrow_mut().refresh_gallery();
 
@@ -547,14 +624,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             })
         });
     }));
-    let weak = window.as_weak();
-    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+    TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
         if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
-            let _ = weak.upgrade_in_event_loop(|w| show_window(&w));
+            with_app(|app| app.show());
         }
     }));
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
-    listen_for_show(window.as_weak());
+    listen_for_show();
 
     {
         let app = app.clone();
@@ -620,7 +696,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Open the window on first run so a new user sees something; later starts stay in the tray.
     if !Config::exists() {
         app.borrow().config.save()?;
-        show_window(&window);
+        app.borrow_mut().show();
     }
     // Closing the window only hides it; the app lives in the tray until "종료".
     slint::run_event_loop_until_quit()?;

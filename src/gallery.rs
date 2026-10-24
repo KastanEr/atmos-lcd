@@ -23,7 +23,8 @@ use crate::media::{self, Media};
 use crate::{render, video};
 
 const MAGIC: &[u8; 4] = b"ATF1";
-const THUMB_SIZE: u32 = 160;
+/// Big enough for the grid at 200% display scaling; the app scales it to the exact size.
+const THUMB_SIZE: u32 = 256;
 /// Keeps the child process from flashing a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -239,6 +240,18 @@ pub fn export_in_process(id: &str, extra_rotation: u16, out_dir: &Path) -> Resul
     });
     video::encode_mp4(&out, render::SIZE, fps, decoded)?;
     Ok(out.display().to_string())
+}
+
+/// The item's thumbnail; remakes it from the first frame if an older version saved it smaller.
+pub fn thumbnail_image(id: &str) -> Option<image::RgbaImage> {
+    let img = image::open(thumb_path(id)).ok()?.into_rgba8();
+    if img.width() >= THUMB_SIZE {
+        return Some(img);
+    }
+    let jpeg = FrameFile::open(&frames_path(id, 0)).and_then(|f| f.read(0)).ok()?;
+    let bytes = thumbnail(&decode_frame(&jpeg).ok()?);
+    let _ = fs::write(thumb_path(id), &bytes);
+    image::load_from_memory(&bytes).ok().map(|i| i.into_rgba8())
 }
 
 /// Decodes a stored 480x480 JPEG frame back into a canvas (for previews and rotation).
