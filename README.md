@@ -110,7 +110,18 @@ documented in [PROTOCOL.md](PROTOCOL.md), covering the handshake, command
 framing, realtime streaming and stored media. `tools/` has the C# probe and the
 pcap parser used during the analysis.
 
+## License
+
+MIT, see [LICENSE](LICENSE). Exceptions:
+
+- `patches/i-slint-backend-winit` keeps Slint's own license (GPL-3.0 or the Slint
+  Royalty-free License 2.0, see its `LICENSES/` folder). This app uses Slint
+  under the Royalty-free License.
+- The Pretendard fonts in `ui/fonts` are under the SIL Open Font License 1.1.
+
 ## Credits
+
+[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)
 
 - [Pretendard](https://github.com/orioncactus/pretendard) font, SIL Open Font
   License 1.1 (`ui/fonts/LICENSE.txt`).
