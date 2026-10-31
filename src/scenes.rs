@@ -36,7 +36,7 @@ pub fn clock(text: &mut TextRenderer) -> Pixmap {
     canvas
 }
 
-/// Outer ring: CPU load. Inner ring: GPU temperature (0-100 °C).
+/// Outer ring: CPU load. Inner ring: GPU load, red from 80 °C.
 pub fn system(text: &mut TextRenderer, s: &Sample) -> Pixmap {
     let mut canvas = render::new_canvas(BG);
 
@@ -44,11 +44,11 @@ pub fn system(text: &mut TextRenderer, s: &Sample) -> Pixmap {
     stroke_arc(&mut canvas, C, C, 205.0, GAUGE_START, GAUGE_SWEEP, 22.0, TRACK);
     stroke_arc(&mut canvas, C, C, 205.0, GAUGE_START, GAUGE_SWEEP * cpu / 100.0, 22.0, CPU_COLOR);
 
-    if let Some(temp) = s.gpu_temp {
-        let t = (temp as f32).clamp(0.0, 100.0);
-        let color = if temp >= 80 { HOT } else { GPU_COLOR };
+    if let Some(load) = s.gpu_load {
+        let l = (load as f32).clamp(0.0, 100.0);
+        let color = if s.gpu_temp.is_some_and(|t| t >= 80) { HOT } else { GPU_COLOR };
         stroke_arc(&mut canvas, C, C, 172.0, GAUGE_START, GAUGE_SWEEP, 14.0, TRACK);
-        stroke_arc(&mut canvas, C, C, 172.0, GAUGE_START, GAUGE_SWEEP * t / 100.0, 14.0, color);
+        stroke_arc(&mut canvas, C, C, 172.0, GAUGE_START, GAUGE_SWEEP * l / 100.0, 14.0, color);
     }
 
     let label = TextStyle { size: 30.0, weight: Weight::SEMIBOLD, color: DIM, ..TextStyle::default() };
@@ -59,6 +59,7 @@ pub fn system(text: &mut TextRenderer, s: &Sample) -> Pixmap {
     let gpu = match (s.gpu_temp, s.gpu_load) {
         (Some(t), Some(l)) => format!("{t}°C · {l}%"),
         (Some(t), None) => format!("{t}°C"),
+        (None, Some(l)) => format!("{l}%"),
         _ => "--".to_string(),
     };
     text.draw_centered(&mut canvas, "GPU", C, C + 55.0, &TextStyle { color: GPU_COLOR, ..label });
